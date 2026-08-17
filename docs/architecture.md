@@ -112,6 +112,7 @@ All tables are defined in `apps/api/migrations/` (0001–0010). Highlights:
 | `oidc_clients`, `oidc_client_secrets` | OIDC applications; current + rotated secrets |
 | `oauth_grants`, `auth_codes` | User consent and single-use authorization codes |
 | `refresh_tokens` | Rotating refresh tokens with family chains |
+| `device_authorizations` | RFC 8628 device grants: pending/approved/denied, polling interval |
 | `access_token_records` | jti allowlist for RFC 7009 revocation |
 | `oidc_signing_keys` | Rotatable RSA keys (PKCS#8 v1 DER in DB) |
 | `service_accounts`, `service_account_credentials` | Machine identities with short-lived credentials |
@@ -199,7 +200,6 @@ rpIdHash, user presence, COSE key parsing, signature verification
 user-handle binding. Challenges are single-use and stored hashed server-side.
 
 ### 5.4 OIDC authorization code + PKCE
-
 1. Product redirects the user to `GET /oidc/authorize` with
    `code_challenge` (S256 required).
 2. The API validates the client and redirect URI (**exact registered match
@@ -214,8 +214,29 @@ user-handle binding. Challenges are single-use and stored hashed server-side.
    verifies PKCE and issues access + id (+ refresh when `offline_access`)
    tokens. `GET /oidc/userinfo` returns scoped claims.
 
-### 5.5 Machine authentication
+### 5.5 Device authorization (RFC 8628)
 
+For CLI/headless clients:
+
+1. `POST /oidc/device_authorization` (client id + secret for confidential
+   clients) returns a `device_code`, an 8-character `user_code`,
+   `verification_uri` (`{web}/device`) and `verification_uri_complete`.
+   Codes are hashed at rest and expire after 15 minutes.
+2. The user signs in at the verification page, sees the client name and
+   requested scopes, and approves or denies (`POST /api/oidc/device-approve`;
+   only active members of the client's organization can decide).
+3. The client polls `POST /oidc/token` with
+   `grant_type=urn:ietf:params:oauth:grant-type:device_code`; pending
+   requests return `authorization_pending` (with `slow_down` enforcement
+   per the polling interval) until approval mints tokens exactly once.
+
+**Account deletion**: `DELETE /api/account` (reauthentication required)
+erases the account — sessions, memberships, passkeys, TOTP seeds, grants
+and OAuth tokens — after revoking OAuth tokens; users who own an
+organization must transfer ownership first. Audit history is retained
+without a foreign key to the user.
+
+### 5.6 Machine authentication
 - **Service accounts** and **devices** authenticate with
   `client_credentials` using their short-lived client id/secret pair
   (90-day service-account credentials, 365-day device credentials, both

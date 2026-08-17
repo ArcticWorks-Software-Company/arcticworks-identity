@@ -671,6 +671,133 @@ async fn device_enrollment_and_permission_check(pool: PgPool) {
     assert_eq!(revoke, 1);
 }
 
+#[sqlx::test(migrations = "./migrations")]
+async fn device_authorization_flow(pool: PgPool) {
+    let router = router(test_state(pool.clone()).await);
+    let owner = create_user(&pool, "owner@example.com", "password-123").await;
+    let outsider = create_user(&pool, "outsider@example.com", "password-123").await;
+    let org = create_org(&pool, "Acme", "acme", owner).await;
+    let session = login_existing(&router, "owner@example.com", "password-123").await;
+    let session_outsider = login_existing(&router, "outsider@example.com", "password-123").await;
+    insert_client(&pool, org, "awapp_test", "test-secret-1").await;
+
+    // Start the device authorization (confidential client, offline_access).
+    let resp = request_form(
+        &router,
+        "POST",
+        "/oidc/device_authorization",
+        &[
+            ("client_id", "awapp_test"),
+            ("client_secret", "test-secret-1"),
+            ("scope", "openid profile offline_access"),
+        ],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    let device_code = body["device_code"].as_str().unwrap().to_string();
+    let user_code = body["user_code"].as_str().unwrap().to_string();
+    assert_eq!(body["verification_uri"].as_str().unwrap(), "http://localhost:5173/device");
+    assert!(body["verification_uri_complete"].as_str().unwrap().contains(&user_code));
+    assert_eq!(body["interval"], 5);
+
+    // A non-member cannot inspect the pending request.
+    let resp = request_as(
+        &router,
+        "GET",
+        &format!("/api/oidc/device-info?user_code={user_code}"),
+        &session_outsider,
+        None,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // Polling before approval: pending, then slow-down on a fast second poll.
+    let resp = poll_device(&router, &device_code).await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = body_json(resp).await;
+    assert!(body["error"]["message"].as_str().unwrap().starts_with("authorization_pending"));
+    let resp = poll_device(&router, &device_code).await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = body_json(resp).await;
+    assert!(body["error"]["message"].as_str().unwrap().starts_with("slow_down"));
+
+    // The owner looks up and approves the request.
+    let resp = request_as(
+        &router,
+        "GET",
+        &format!("/api/oidc/device-info?user_code={user_code}"),
+        &session,
+        None,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["client"]["name"], "Test app");
+    let resp = request_as(
+        &router,
+        "POST",
+        "/api/oidc/device-approve",
+        &session,
+        Some(serde_json::json!({ "user_code": user_code, "decision": "approve" })),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Polling now returns tokens (with a refresh token for offline_access).
+    let resp = poll_device(&router, &device_code).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    let access = body["access_token"].as_str().unwrap().to_string();
+    assert!(body["id_token"].is_string());
+    assert!(body["refresh_token"].is_string());
+
+    let resp = request_bearer(&router, "GET", "/oidc/userinfo", &access, None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // The device code is single-use.
+    let resp = poll_device(&router, &device_code).await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = body_json(resp).await;
+    assert!(body["error"]["message"].as_str().unwrap().starts_with("expired_token"));
+
+    // Deny path.
+    let resp = request_form(
+        &router,
+        "POST",
+        "/oidc/device_authorization",
+        &[("client_id", "awapp_test"), ("client_secret", "test-secret-1"), ("scope", "openid")],
+    )
+    .await;
+    let body = body_json(resp).await;
+    let device_code2 = body["device_code"].as_str().unwrap().to_string();
+    let user_code2 = body["user_code"].as_str().unwrap().to_string();
+    let resp = request_as(
+        &router,
+        "POST",
+        "/api/oidc/device-approve",
+        &session,
+        Some(serde_json::json!({ "user_code": user_code2, "decision": "deny" })),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = poll_device(&router, &device_code2).await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = body_json(resp).await;
+    assert!(body["error"]["message"].as_str().unwrap().starts_with("access_denied"));
+
+    // Audit trail.
+    let started: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_events WHERE event_type = 'device.authorization_started'")
+        .fetch_one(&pool).await.unwrap();
+    let approved: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_events WHERE event_type = 'device.approved'")
+        .fetch_one(&pool).await.unwrap();
+    let denied: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_events WHERE event_type = 'device.denied'")
+        .fetch_one(&pool).await.unwrap();
+    let issued: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_events WHERE event_type = 'device.token_issued'")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!((started, approved, denied, issued), (2, 1, 1, 1));
+}
+
 // ------------------------------------------------------------------ helpers
 
 #[sqlx::test(migrations = "./migrations")]
@@ -759,6 +886,21 @@ async fn rp_initiated_logout_ends_the_browser_session(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(count, 2);
+}
+
+async fn poll_device(router: &axum::Router, code: &str) -> axum::response::Response<axum::body::Body> {
+    request_form(
+        router,
+        "POST",
+        "/oidc/token",
+        &[
+            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+            ("device_code", code),
+            ("client_id", "awapp_test"),
+            ("client_secret", "test-secret-1"),
+        ],
+    )
+    .await
 }
 
 async fn refresh_tokens(router: &axum::Router, token: &str) -> axum::response::Response<axum::body::Body> {

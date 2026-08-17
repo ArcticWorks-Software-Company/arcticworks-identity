@@ -494,6 +494,66 @@ async fn totp_mfa_flow(pool: PgPool) {
     }
 }
 
+#[sqlx::test(migrations = "./migrations")]
+async fn account_deletion_requires_reauth_and_respects_ownership(pool: PgPool) {
+    let router = router(test_state(pool.clone()).await);
+    let owner = create_user(&pool, "owner@example.com", "password-123").await;
+    let member = create_user(&pool, "member@example.com", "password-123").await;
+    let org = create_org(&pool, "Acme", "acme", owner).await;
+    add_member(&pool, org, member, "Member").await;
+
+    // Owners cannot delete their account while they own an organization.
+    let session_owner = login_existing(&router, "owner@example.com", "password-123").await;
+    request_as(
+        &router,
+        "POST",
+        "/api/auth/reauth",
+        &session_owner,
+        Some(serde_json::json!({ "password": "password-123" })),
+    )
+    .await;
+    let resp = request_as(&router, "DELETE", "/api/account", &session_owner, None).await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+    // A member needs reauthentication, then deletion succeeds.
+    let session = login_existing(&router, "member@example.com", "password-123").await;
+    let resp = request_as(&router, "DELETE", "/api/account", &session, None).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    request_as(
+        &router,
+        "POST",
+        "/api/auth/reauth",
+        &session,
+        Some(serde_json::json!({ "password": "password-123" })),
+    )
+    .await;
+    let resp = request_as(&router, "DELETE", "/api/account", &session, None).await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // The user is gone: login fails and the membership cascaded away.
+    let resp = request(
+        &router,
+        "POST",
+        "/api/auth/login",
+        Some(serde_json::json!({ "email": "member@example.com", "password": "password-123" })),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let memberships: i64 = sqlx::query_scalar("SELECT count(*) FROM org_memberships WHERE user_id = $1")
+        .bind(member)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(memberships, 0);
+
+    // The deletion is audited (audit rows survive without the user).
+    let deleted: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_events WHERE event_type = 'account.deleted'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(deleted, 1);
+}
+
 pub async fn login_existing(router: &axum::Router, email: &str, password: &str) -> String {
     let resp = request(
         router,
