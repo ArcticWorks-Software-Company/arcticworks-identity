@@ -30,9 +30,9 @@
     "esbuild@0.28.1": true
   },
   "overrides": {
-    "cookie": "0.7.2"
+    "cookie": "2.0.1"
   },
   "devDependencies": {
-    "cookie": "0.7.2"
+    "cookie": "2.0.1"
   }
 }
