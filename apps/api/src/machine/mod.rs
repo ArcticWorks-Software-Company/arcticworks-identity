@@ -499,6 +499,7 @@ pub async fn suspend_service_account(
     authed: Authed,
     Path((org_id, sa_id)): Path<(Uuid, Uuid)>,
 ) -> ApiResult<Response> {
+    authed.0.require_reauth(&state.config)?;
     set_sa_status(&state, &meta, authed.0.user.id, org_id, sa_id, "suspended").await
 }
 
@@ -523,6 +524,7 @@ pub async fn unsuspend_service_account(
     authed: Authed,
     Path((org_id, sa_id)): Path<(Uuid, Uuid)>,
 ) -> ApiResult<Response> {
+    authed.0.require_reauth(&state.config)?;
     set_sa_status(&state, &meta, authed.0.user.id, org_id, sa_id, "active").await
 }
 
@@ -755,8 +757,9 @@ pub async fn enroll_device(
     let (client_id, secret, secret_hash, preview, expires_at) = generate_credential("awdev", "awdsec", DEVICE_CRED_TTL_DAYS);
     sqlx::query(
         r#"
-        INSERT INTO devices (id, org_id, team_id, name, client_id, credential_hash, secret_preview, status)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, 'active')
+        INSERT INTO devices
+            (id, org_id, team_id, name, client_id, credential_hash, secret_preview, credential_expires_at, status)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active')
         "#,
     )
     .bind(device_id)
@@ -766,6 +769,7 @@ pub async fn enroll_device(
     .bind(&client_id)
     .bind(&secret_hash)
     .bind(&preview)
+    .bind(expires_at)
     .execute(&state.pool)
     .await
     .map_internal("enroll device")?;
@@ -968,11 +972,12 @@ pub async fn rotate_device_credential(
 
     let (client_id, secret, secret_hash, preview, expires_at) = generate_credential("awdev", "awdsec", DEVICE_CRED_TTL_DAYS);
     sqlx::query(
-        "UPDATE devices SET client_id = $1, credential_hash = $2, secret_preview = $3 WHERE id = $4 AND org_id = $5",
+        "UPDATE devices SET client_id = $1, credential_hash = $2, secret_preview = $3, credential_expires_at = $4 WHERE id = $5 AND org_id = $6",
     )
     .bind(&client_id)
     .bind(&secret_hash)
     .bind(&preview)
+    .bind(expires_at)
     .bind(device_id)
     .bind(org_id)
     .execute(&state.pool)
@@ -1103,7 +1108,7 @@ pub async fn authenticate_machine(
     // Device credential.
     if let Some(row) = sqlx::query_as::<_, DeviceCredRow>(
         r#"
-        SELECT id, org_id, name, credential_hash, status
+        SELECT id, org_id, name, credential_hash, credential_expires_at, status
         FROM devices
         WHERE client_id = $1
         "#,
@@ -1113,7 +1118,7 @@ pub async fn authenticate_machine(
     .await
     .map_internal("lookup device credential")?
     {
-        if row.status != "active" {
+        if row.status != "active" || row.credential_expires_at <= chrono::Utc::now() {
             return Err(ApiError::Unauthorized);
         }
         if !tokens_equal(&hash_token(secret), &row.credential_hash) {
@@ -1151,6 +1156,7 @@ struct DeviceCredRow {
     org_id: Uuid,
     name: String,
     credential_hash: String,
+    credential_expires_at: chrono::DateTime<chrono::Utc>,
     status: String,
 }
 

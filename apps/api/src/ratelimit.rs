@@ -75,19 +75,21 @@ impl RateLimiter {
         if let Some(redis) = &self.redis {
             let mut conn = redis.clone();
             let redis_key = format!("rl:{scope}:{key}");
-            let result: (i64, i64) = redis::cmd("EVAL")
+            let result: redis::RedisResult<(i64, i64)> = redis::cmd("EVAL")
                 .arg(SCRIPT)
                 .arg(1)
                 .arg(&redis_key)
                 .arg(limit)
                 .arg(window_secs)
                 .query_async(&mut conn)
-                .await
-                .unwrap_or((1, 0));
-            if result.0 == 1 {
-                Ok(())
-            } else {
-                Err(result.1.max(1) as u64)
+                .await;
+            match result {
+                Ok((1, _)) => Ok(()),
+                Ok((_, ttl)) => Err(ttl.max(1) as u64),
+                Err(error) => {
+                    tracing::warn!(%error, scope, "redis rate-limit check failed; using in-memory fallback");
+                    self.check_mem(scope, key, limit, window_secs)
+                }
             }
         } else {
             self.check_mem(scope, key, limit, window_secs)

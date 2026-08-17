@@ -502,6 +502,7 @@ pub async fn update_role(
     Json(req): Json<UpdateRoleReq>,
 ) -> ApiResult<Response> {
     rbac_authorize(&state, authed.0.user.id, org_id, perms::ROLES_MANAGE).await?;
+    authed.0.require_reauth(&state.config)?;
 
     let role = sqlx::query_as::<_, RoleRow>(
         "SELECT id, name, is_system, is_owner, description FROM roles WHERE id = $1 AND org_id = $2",
@@ -691,6 +692,9 @@ pub async fn permission_check(
         .ok_or(ApiError::Unauthorized)?;
 
     let tok = token::validate_access_token(&state, token_str, None).await?;
+    if !matches!(tok.actor_type.as_str(), "service_account" | "device") {
+        return Err(ApiError::Forbidden);
+    }
     let Some(actor_org) = tok.org_id else {
         return Err(ApiError::Forbidden);
     };

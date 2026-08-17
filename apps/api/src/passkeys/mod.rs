@@ -485,12 +485,15 @@ async fn consume_challenge(
     challenge: &str,
 ) -> ApiResult<String> {
     let bound_user = if user_id.is_nil() { None } else { Some(user_id) };
+    // Single atomic consume: the first concurrent caller wins; a second
+    // attempt with the same challenge finds no row and is rejected.
     let row = sqlx::query_as::<_, (String,)>(
         r#"
-        SELECT challenge FROM webauthn_challenges
+        DELETE FROM webauthn_challenges
         WHERE challenge = $1 AND purpose = $2
           AND (user_id IS NOT DISTINCT FROM $3)
           AND expires_at > now()
+        RETURNING challenge
         "#,
     )
     .bind(challenge)
@@ -498,17 +501,11 @@ async fn consume_challenge(
     .bind(bound_user)
     .fetch_optional(&state.pool)
     .await
-    .map_internal("lookup webauthn challenge")?;
+    .map_internal("consume webauthn challenge")?;
 
     let Some((stored,)) = row else {
         return Err(ApiError::TokenInvalid);
     };
-
-    sqlx::query("DELETE FROM webauthn_challenges WHERE challenge = $1")
-        .bind(challenge)
-        .execute(&state.pool)
-        .await
-        .map_internal("consume webauthn challenge")?;
 
     Ok(stored)
 }

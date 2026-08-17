@@ -68,12 +68,19 @@ pub struct Config {
     pub smtp: SmtpConfig,
     /// Trust X-Forwarded-For when behind a reverse proxy (production).
     pub trust_proxy: bool,
+    /// Base64-encoded 32-byte key encrypting TOTP secrets at rest.
+    pub totp_enc_key: Option<String>,
     /// Run database migrations at startup (development convenience).
     pub auto_migrate: bool,
+    /// Serve the Swagger/OpenAPI UI at /api/docs.
+    pub docs_enabled: bool,
     pub log_format: LogFormat,
 
     pub seed_admin_email: String,
     pub seed_admin_password: String,
+    /// Resetting the admin password on every seed run is a production
+    /// footgun; only do it when explicitly requested.
+    pub seed_reset_admin_password: bool,
     pub seed_member_emails: Vec<String>,
     pub seed_org_name: String,
 
@@ -173,10 +180,15 @@ impl Config {
             rp_origins: split_list(&get("RP_ORIGINS", "http://localhost:5173")),
             smtp,
             trust_proxy: get_bool("TRUST_PROXY", false),
+            totp_enc_key: std::env::var("TOTP_ENC_KEY")
+                .ok()
+                .filter(|v| !v.is_empty()),
             auto_migrate: get_bool("AUTO_MIGRATE", true),
+            docs_enabled: get_bool("DOCS_ENABLED", true),
             log_format,
             seed_admin_email: get("SEED_ADMIN_EMAIL", "admin@arcticworks.dev"),
             seed_admin_password: get("SEED_ADMIN_PASSWORD", "ChangeMe-1234"),
+            seed_reset_admin_password: get_bool("SEED_RESET_ADMIN_PASSWORD", false),
             seed_member_emails: split_list(&get("SEED_MEMBER_EMAILS", "")),
             seed_org_name: get("SEED_ORG_NAME", "ArcticWorks"),
             register_rate_limit_per_hour: std::env::var("REGISTER_RATE_LIMIT_PER_HOUR")

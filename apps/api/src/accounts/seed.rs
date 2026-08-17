@@ -16,19 +16,25 @@ pub async fn seed(state: &AppState) -> anyhow::Result<()> {
     .await?;
 
     if existing {
-        // Keep the dev admin usable: refresh password and ensure verification.
+        // Never silently reset a production admin credential. Refresh the
+        // password only when explicitly requested (SEED_RESET_ADMIN_PASSWORD).
         let user_id = sqlx::query_scalar::<_, uuid::Uuid>("SELECT id FROM users WHERE email = $1")
             .bind(&email)
             .fetch_one(&state.pool)
             .await?;
-        let password_hash = hash_password(&password).map_err(|e| anyhow::anyhow!("hash password: {e}"))?;
-        sqlx::query(
-            "UPDATE users SET password_hash = $1, email_verified_at = COALESCE(email_verified_at, now()) WHERE id = $2",
-        )
-        .bind(&password_hash)
-        .bind(user_id)
-        .execute(&state.pool)
-        .await?;
+        if state.config.seed_reset_admin_password {
+            let password_hash = hash_password(&password).map_err(|e| anyhow::anyhow!("hash password: {e}"))?;
+            sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
+                .bind(&password_hash)
+                .bind(user_id)
+                .execute(&state.pool)
+                .await?;
+            println!("seeded admin password reset for {email}");
+        }
+        sqlx::query("UPDATE users SET email_verified_at = COALESCE(email_verified_at, now()) WHERE id = $1")
+            .bind(user_id)
+            .execute(&state.pool)
+            .await?;
     } else {
         let user_id = new_id();
         let password_hash = hash_password(&password).map_err(|e| anyhow::anyhow!("hash password: {e}"))?;
