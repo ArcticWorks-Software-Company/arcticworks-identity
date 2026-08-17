@@ -45,6 +45,7 @@ codes, organization data, audit log, signing keys, email tokens.
 | O7 | Scope escalation on refresh | Low | Over-privilege | Refresh tokens carry their original scope set; grants store the granted scopes; consent is skipped only when the stored grant covers the requested scopes |
 | O8 | Consent UI confusion | Medium | Deceptive authorization | Consent screen is on the Identity origin, shows full application identity and the exact redirect URI |
 | O9 | Token endpoint abuse (guessing) | Low | Token theft | Tokens are 256-bit random; constant-time comparisons; rate-limited token endpoint |
+| O10 | Device-flow phishing / code guessing | Medium | Account takeover at the client | User codes are 8 characters, hashed at rest, 15-minute expiry; approval requires an active membership in the client's organization; polling enforces `slow_down`; denied/expired codes yield no tokens; approval is audited |
 
 ## 4. Tenancy and authorization
 

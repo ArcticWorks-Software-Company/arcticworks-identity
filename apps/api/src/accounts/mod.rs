@@ -197,6 +197,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/account/password", post(change_password))
         .route("/api/account/profile", post(update_profile))
         .route("/api/account/recovery-codes", get(generate_recovery_codes))
+        .route("/api/account", axum::routing::delete(delete_account))
 }
 
 // ---------------------------------------------------------------- handlers
@@ -623,6 +624,58 @@ async fn reset_password(
             org_id: None,
             target_type: Some("user"),
             target_id: Some(user_id),
+            metadata: serde_json::json!({}),
+        },
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// Permanently delete the caller's account (requires reauthentication).
+/// Users who own an organization must transfer ownership or delete the
+/// organization first. OAuth tokens are revoked before the user row is
+/// deleted; audit history is retained without a foreign key to the user.
+async fn delete_account(
+    State(state): State<AppState>,
+    meta: HttpMeta,
+    authed: Authed,
+) -> ApiResult<Response> {
+    authed.0.require_reauth(&state.config)?;
+
+    let owns_org = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM organizations WHERE owner_id = $1)",
+    )
+    .bind(authed.0.user.id)
+    .fetch_one(&state.pool)
+    .await
+    .map_internal("check organization ownership")?;
+    if owns_org {
+        return Err(ApiError::Conflict(
+            "transfer ownership or delete your organizations before deleting your account".into(),
+        ));
+    }
+
+    crate::oidc::token::revoke_user_tokens(&state, authed.0.user.id, None).await?;
+    let res = sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(authed.0.user.id)
+        .execute(&state.pool)
+        .await
+        .map_internal("delete account")?;
+    if res.rows_affected() == 0 {
+        return Err(ApiError::NotFound);
+    }
+
+    audit::record(
+        &state.pool,
+        &meta,
+        AuditEvent {
+            event_type: "account.deleted",
+            actor_type: ActorType::User,
+            actor_id: Some(authed.0.user.id),
+            org_id: None,
+            target_type: Some("user"),
+            target_id: Some(authed.0.user.id),
             metadata: serde_json::json!({}),
         },
     )

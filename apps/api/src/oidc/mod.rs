@@ -26,6 +26,7 @@ use crate::util;
 use base64::Engine;
 use secrecy::ExposeSecret;
 
+pub mod device;
 pub mod keys;
 pub mod seed;
 pub mod token;
@@ -168,6 +169,7 @@ pub fn routes() -> Router<AppState> {
         .route("/oidc/userinfo", get(userinfo))
         .route("/oidc/revoke", post(revoke))
         .route("/oidc/end-session", get(end_session).post(end_session_post))
+        .merge(device::routes())
         .route(
             "/api/orgs/{org_id}/applications",
             get(list_applications).post(create_application),
@@ -199,8 +201,9 @@ async fn discovery(State(state): State<AppState>) -> ApiResult<Response> {
         "jwks_uri": format!("{iss}/oidc/jwks.json"),
         "revocation_endpoint": format!("{iss}/oidc/revoke"),
         "end_session_endpoint": format!("{iss}/oidc/end-session"),
+        "device_authorization_endpoint": format!("{iss}/oidc/device_authorization"),
         "response_types_supported": ["code"],
-        "grant_types_supported": ["authorization_code", "refresh_token", "client_credentials"],
+        "grant_types_supported": ["authorization_code", "refresh_token", "client_credentials", "urn:ietf:params:oauth:grant-type:device_code"],
         "subject_types_supported": ["public"],
         "id_token_signing_alg_values_supported": ["RS256"],
         "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post"],
@@ -530,6 +533,9 @@ async fn token_endpoint(
         "authorization_code" => token_auth_code(&state, &meta, &headers, &form).await,
         "refresh_token" => token_refresh(&state, &meta, &headers, &form).await,
         "client_credentials" => token_client_credentials(&state, &meta, &headers, &form).await,
+        "urn:ietf:params:oauth:grant-type:device_code" => {
+            device::token_device_code(&state, &meta, &headers, &form).await
+        }
         other => Err(oauth_token_error("unsupported_grant_type", &format!("{other} is not supported"))),
     }
 }
@@ -1533,6 +1539,7 @@ async fn revoke_account_grant(
 #[derive(Debug)]
 struct AuthedClient {
     client_id: String,
+    org_id: Option<Uuid>,
     is_confidential: bool,
     has_secret: bool,
     name: String,
@@ -1668,6 +1675,7 @@ async fn authenticate_client(
         }
         Ok(AuthedClient {
             client_id,
+            org_id: client.org_id,
             is_confidential: true,
             has_secret: !presented_secret.is_empty(),
             name: client.name,
@@ -1675,6 +1683,7 @@ async fn authenticate_client(
     } else {
         Ok(AuthedClient {
             client_id,
+            org_id: client.org_id,
             is_confidential: false,
             has_secret: !presented_secret.is_empty(),
             name: client.name,
