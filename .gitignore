@@ -1,0 +1,31 @@
+# Node
+node_modules/
+dist/
+build/
+.svelte-kit/
+*.tsbuildinfo
+.vite/
+
+# Rust
+target/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# Test artifacts
+playwright-report/
+test-results/
+coverage/
+e2e/.auth/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
