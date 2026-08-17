@@ -160,6 +160,23 @@ export class OidcClient {
     return (await resp.json()) as UserInfoClaims;
   }
 
+  /** Build the OIDC RP-Initiated Logout URL. The caller sends the browser
+   * there (optionally after clearing local tokens); the returned URL is only
+   * meaningful when the application registered the `postLogoutRedirectUri`. */
+  async endSessionUrl(options?: { idTokenHint?: string; postLogoutRedirectUri?: string; state?: string }): Promise<string | null> {
+    const doc = await this.discovery();
+    const endpoint = doc.end_session_endpoint;
+    if (!endpoint) return null;
+    const params = new URLSearchParams();
+    if (options?.idTokenHint) params.set("id_token_hint", options.idTokenHint);
+    if (options?.postLogoutRedirectUri) {
+      params.set("post_logout_redirect_uri", options.postLogoutRedirectUri);
+      params.set("client_id", this.config.clientId);
+    }
+    if (options?.state) params.set("state", options.state);
+    return `${endpoint}?${params.toString()}`;
+  }
+
   /** The end-session/return URL is the authorize flow's `prompt=login`; for
    * simple apps, clearing local tokens is the correct logout. */
   private async tokenRequest(endpoint: string, body: URLSearchParams): Promise<TokenSet> {

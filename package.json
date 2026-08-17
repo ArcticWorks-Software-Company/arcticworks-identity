@@ -2,6 +2,7 @@
   "name": "arcticworks-identity",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "description": "ArcticWorks Identity — centralized identity and access platform for the ArcticWorks ecosystem",
   "workspaces": [
     "apps/web",
@@ -27,5 +28,11 @@
   },
   "allowScripts": {
     "esbuild@0.28.1": true
+  },
+  "overrides": {
+    "cookie": "0.7.2"
+  },
+  "devDependencies": {
+    "cookie": "0.7.2"
   }
 }

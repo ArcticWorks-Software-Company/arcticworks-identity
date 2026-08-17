@@ -19,6 +19,10 @@ body {
   min-height: 100dvh;
 }
 
+.sveltekit-body {
+  display: contents;
+}
+
 a {
   color: var(--aw-color-interactive-primary);
 }

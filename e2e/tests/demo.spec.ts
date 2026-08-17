@@ -110,12 +110,16 @@ test("the full demonstration flow", async ({ browser }) => {
   await acceptInvitation(member, await latestInviteLink(memberEmail, acmeInvite));
 
   // ---- Step 5: role assignment ----------------------------------------
-  // Admin changes the member's role to Viewer via the UI.
+  // Admin changes the member's role to Viewer via the UI (sensitive action:
+  // the reauthentication dialog appears and must be confirmed).
   await admin.goto(`${WEB}/orgs/${orgSlug}/members`);
   await admin
     .locator("tr", { hasText: memberEmail })
     .locator("select")
     .selectOption({ label: "Viewer" });
+  await expect(admin.getByText("Confirm your password").first()).toBeVisible();
+  await admin.getByPlaceholder("Password").fill(PASSWORD);
+  await admin.getByRole("button", { name: "Confirm" }).click();
   await expect(admin.getByText(memberEmail).first()).toBeVisible();
 
   // A Viewer cannot manage teams — the create button is absent.
@@ -134,6 +138,9 @@ test("the full demonstration flow", async ({ browser }) => {
 
   await admin.goto(`${WEB}/orgs/arcticworks/members`);
   await admin.locator("tr", { hasText: memberEmail }).locator("select").selectOption({ label: "Document Reader" });
+  await expect(admin.getByText("Confirm your password").first()).toBeVisible();
+  await admin.getByPlaceholder("Password").fill(PASSWORD);
+  await admin.getByRole("button", { name: "Confirm" }).click();
 
   // ---- Step 6: OIDC login from the mock Continuity app ----------------
   await member.goto(`${MOCK}/`);
