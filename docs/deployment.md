@@ -78,11 +78,12 @@ works without CORS and `SameSite=Lax` fully applies.
 ```sh
 # Rotate the active OIDC signing key (new key signs immediately; JWKS keeps
 # the retired key for 24 hours so in-flight tokens still validate).
-cargo run --bin api -- rotate-keys        # or call the documented admin op
+cargo run --bin keys -- rotate
 ```
 
 Verify after rotation: `GET /oidc/jwks.json` contains two keys (active +
-retired), new tokens validate, old tokens validate until their expiry.
+retired), new tokens validate, and tokens minted before the rotation keep
+validating until their expiry (validation honors the 24-hour grace window).
 
 ### Sign-out / user lifecycle
 
@@ -91,8 +92,11 @@ retired), new tokens validate, old tokens validate until their expiry.
   family.
 - RFC 7009 revocation marks access-token jti records; UserInfo and the
   permission-check endpoint reject revoked tokens.
-- Suspending a member denies all organization access immediately (checks are
-  evaluated per request).
+- Suspending a member denies all organization access immediately: the
+  permission-check endpoint denies by default and the user's OAuth access
+  and refresh tokens are revoked.
+- Suspended service accounts and revoked devices are checked on every
+  access-token validation, so already-issued bearer tokens stop working.
 
 ### Observability
 

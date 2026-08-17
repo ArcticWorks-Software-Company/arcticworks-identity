@@ -97,7 +97,7 @@ logic.
 
 ## 3. Data model
 
-All tables are defined in `apps/api/migrations/` (0001–0007). Highlights:
+All tables are defined in `apps/api/migrations/` (0001–0010). Highlights:
 
 | Table | Purpose |
 |---|---|
@@ -105,6 +105,7 @@ All tables are defined in `apps/api/migrations/` (0001–0007). Highlights:
 | `email_verifications`, `password_resets` | One-time tokens, hashed, expiring |
 | `sessions` | Browser sessions: opaque token hash, active org, reauth timestamp |
 | `recovery_code_sets`, `recovery_codes` | Recovery codes, hashed, single-use |
+| `totp_secrets`, `mfa_challenges` | TOTP second factor: AES-256-GCM encrypted seeds; single-use login challenges |
 | `organizations`, `org_memberships` | Tenancy root; membership carries role + status |
 | `invitations`, `teams`, `team_members` | Invite-by-email flow; simple teams |
 | `roles`, `role_permissions` | Org-scoped roles; built-ins per org: Owner, Administrator, Member, Viewer |
@@ -122,9 +123,10 @@ All tables are defined in `apps/api/migrations/` (0001–0007). Highlights:
 Nothing credential-shaped is stored in plaintext: passwords (Argon2id),
 session tokens, authorization codes, refresh tokens, invitation/verification
 tokens, enrollment tokens, recovery codes and client secrets are all stored
-as **SHA-256 hashes** and compared in constant time. Client secrets, service
-account credentials and device credentials are shown exactly once at
-generation; the UI stores only a preview suffix.
+as **SHA-256 hashes** and compared in constant time; TOTP secrets are stored
+**AES-256-GCM encrypted**. Client secrets, service account credentials and
+device credentials are shown exactly once at generation; the UI stores only
+a preview suffix.
 
 ## 4. Session and token model
 
@@ -140,9 +142,13 @@ generation; the UI stores only a preview suffix.
 ### 4.2 OAuth/OIDC tokens
 
 - **Access tokens**: RS256 JWTs, 15-minute lifetime, minimal claims
-  (`iss`, `sub`, `aud`, `exp`, `iat`, `jti`, `org`, `actor_type`, `scope`).
-  Every issued token is recorded (`access_token_records`) so RFC 7009
-  revocation works.
+  (`iss`, `sub`, `aud`, `exp`, `iat`, `jti`, `org`, `actor_type`, `scope`)
+  and a `kid` header. Every issued token is recorded (`access_token_records`),
+  which serves as both the RFC 7009 revocation store and a jti allowlist.
+  Validation checks the record (unrevoked, unexpired, claim-consistent) and
+  the actor's live status (active membership for users, active service
+  accounts, unrevoked devices), so suspension or revocation invalidates
+  already-issued tokens.
 - **ID tokens**: OIDC Core compliant (`auth_time`, `nonce`, `azp`,
   `at_hash`, profile/email claims per scope).
 - **Refresh tokens**: opaque, rotating on every use (30-day sliding expiry),
@@ -157,8 +163,10 @@ generation; the UI stores only a preview suffix.
 RSA-2048 keys generated at runtime (PKCS#8 v1 DER stored in the database;
 the `rsa` crate emits v2, which ring rejects — the v1 envelope is built
 manually). The active key signs; JWKS publishes the active key plus keys
-retired within the last 24 hours. Rotation is a documented runbook step
-(`oidc::keys::rotate_key`, see deployment docs).
+retired within the last 24 hours. Access-token verification honors the same
+grace window (selected by `kid`), so rotation never invalidates in-flight
+tokens. Rotation is a documented runbook step (`cargo run --bin keys --
+rotate`, see deployment docs).
 
 ## 5. Authentication flows
 
@@ -167,9 +175,21 @@ retired within the last 24 hours. Rotation is a documented runbook step
 `POST /api/auth/login` — rate limited per IP and per account; generic
 failure message (no account enumeration); unverified accounts are refused
 with `email_not_verified`; success sets the session cookie and audits
-`auth.login`.
+`auth.login`. Users with an enabled TOTP second factor receive a short-lived
+single-use challenge instead of a session and complete the step at
+`POST /api/auth/mfa`.
 
-### 5.2 Passkeys (WebAuthn)
+### 5.2 TOTP two-factor authentication
+
+RFC 6238 (SHA-1, 30-second period, 6 digits). Setup requires reauthentication:
+the API generates a 160-bit secret, returns it once as base32 (with an
+`otpauth://` URI), and stores it **AES-256-GCM encrypted** (key from
+`TOTP_ENC_KEY`; ephemeral with a warning when unset). A correct code within
+the current/previous/next window enables the factor; verification is
+rate-limited per account. Disabling requires reauthentication. Recovery
+codes and passkey login remain available as alternative factors.
+
+### 5.3 Passkeys (WebAuthn)
 
 Attestation `none`; the platform advertises ES256, RS256 and EdDSA
 credentials. Verification is implemented in pure Rust (`passkeys::webauthn`)
@@ -178,7 +198,7 @@ rpIdHash, user presence, COSE key parsing, signature verification
 (P-256 / RSA PKCS#1 v1.5 / Ed25519), sign-counter regression detection, and
 user-handle binding. Challenges are single-use and stored hashed server-side.
 
-### 5.3 OIDC authorization code + PKCE
+### 5.4 OIDC authorization code + PKCE
 
 1. Product redirects the user to `GET /oidc/authorize` with
    `code_challenge` (S256 required).
@@ -194,7 +214,7 @@ user-handle binding. Challenges are single-use and stored hashed server-side.
    verifies PKCE and issues access + id (+ refresh when `offline_access`)
    tokens. `GET /oidc/userinfo` returns scoped claims.
 
-### 5.4 Machine authentication
+### 5.5 Machine authentication
 
 - **Service accounts** and **devices** authenticate with
   `client_credentials` using their short-lived client id/secret pair

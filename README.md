@@ -42,3 +42,7 @@ npm run dev:mock              # mock product app on http://localhost:5174
 - [Threat model](docs/threat-model.md)
 - [Development](docs/development.md)
 - [Deployment](docs/deployment.md)
+
+## License
+
+MIT. See [LICENSE](LICENSE).
