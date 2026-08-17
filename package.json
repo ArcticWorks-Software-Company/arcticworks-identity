@@ -1,0 +1,31 @@
+{
+  "name": "arcticworks-identity",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ArcticWorks Identity — centralized identity and access platform for the ArcticWorks ecosystem",
+  "workspaces": [
+    "apps/web",
+    "packages/identity-sdk",
+    "examples/continuity-mock",
+    "e2e"
+  ],
+  "scripts": {
+    "dev:api": "cargo run --manifest-path apps/api/Cargo.toml",
+    "dev:web": "npm run dev -w apps/web",
+    "dev:mock": "npm run dev -w examples/continuity-mock",
+    "infra:up": "docker compose up -d",
+    "infra:down": "docker compose down",
+    "db:migrate": "cargo run --manifest-path apps/api/Cargo.toml --bin migrate",
+    "db:seed": "cargo run --manifest-path apps/api/Cargo.toml --bin seed",
+    "test:api": "cargo test --manifest-path apps/api/Cargo.toml",
+    "test:sdk": "npm run test -w packages/identity-sdk",
+    "test:web": "npm run test -w apps/web",
+    "test:e2e": "npm run test -w e2e",
+    "check:web": "npm run check -w apps/web",
+    "build:sdk": "npm run build -w packages/identity-sdk",
+    "build:web": "npm run build -w apps/web"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true
+  }
+}
