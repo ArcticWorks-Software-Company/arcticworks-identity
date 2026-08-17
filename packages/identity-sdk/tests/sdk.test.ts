@@ -15,6 +15,7 @@ const DISCOVERY = {
   userinfo_endpoint: "http://identity.test/oidc/userinfo",
   jwks_uri: "http://identity.test/oidc/jwks.json",
   revocation_endpoint: "http://identity.test/oidc/revoke",
+  end_session_endpoint: "http://identity.test/oidc/end-session",
   response_types_supported: ["code"],
   grant_types_supported: ["authorization_code", "refresh_token", "client_credentials"],
   subject_types_supported: ["public"],
@@ -69,6 +70,22 @@ describe("OidcClient", () => {
     clientId: "awapp_test",
     redirectUri: "http://localhost:5174/callback",
   };
+
+  it("builds the OIDC end-session URL with hint, redirect and state", async () => {
+    const client = new OidcClient(config, mockFetch({ "/.well-known/openid-configuration": DISCOVERY }));
+    const url = await client.endSessionUrl({
+      idTokenHint: "id.jwt.token",
+      postLogoutRedirectUri: "http://localhost:5174/logout",
+      state: "bye",
+    });
+    expect(url).not.toBeNull();
+    const parsed = new URL(url!);
+    expect(parsed.origin + parsed.pathname).toBe("http://identity.test/oidc/end-session");
+    expect(parsed.searchParams.get("id_token_hint")).toBe("id.jwt.token");
+    expect(parsed.searchParams.get("post_logout_redirect_uri")).toBe("http://localhost:5174/logout");
+    expect(parsed.searchParams.get("client_id")).toBe("awapp_test");
+    expect(parsed.searchParams.get("state")).toBe("bye");
+  });
 
   it("builds an authorize URL with PKCE, state and nonce", async () => {
     const client = new OidcClient(config, mockFetch({ "/.well-known/openid-configuration": DISCOVERY }));

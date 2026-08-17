@@ -16,6 +16,7 @@ function sourceFiles(directory: string): string[] {
 const files = sourceFiles(srcRoot);
 const sources = files.map((path) => ({ path, content: readFileSync(path, "utf8") }));
 const appCss = readFileSync(join(srcRoot, "app.css"), "utf8");
+const appHtml = readFileSync(join(srcRoot, "app.html"), "utf8");
 const confirmDialog = readFileSync(join(srcRoot, "lib", "ui", "ConfirmDialog.svelte"), "utf8");
 const dialog = readFileSync(join(srcRoot, "lib", "ui", "Dialog.svelte"), "utf8");
 
@@ -24,6 +25,7 @@ describe("ArcticWorks UI contracts", () => {
     for (const source of sources.filter(({ path }) => path.endsWith(".svelte"))) {
       expect(source.content, source.path).not.toMatch(/\sstyle=/);
     }
+    expect(appHtml).not.toMatch(/\sstyle=/);
   });
 
   it("uses the component library instead of raw form and table controls", () => {

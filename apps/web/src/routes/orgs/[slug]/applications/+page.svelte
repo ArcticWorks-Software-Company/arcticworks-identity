@@ -33,18 +33,17 @@
   $effect(() => void load());
 
   async function toggleEnabled(app: ApplicationJson) {
-    try {
+    await withReauth(async () => {
       await api.patch(`/api/orgs/${orgId}/applications/${app.clientId}`, { applicationEnabled: !app.applicationEnabled });
       await load();
-    } catch (e) {
-      error = e instanceof Error ? e.message : "Could not update the application";
-    }
+    });
   }
 
   // Create
   let showCreate = $state(false);
   let appName = $state("");
   let appUris = $state("");
+  let appLogoutUris = $state("");
   let appConfidential = $state(true);
   let appError = $state("");
   let appBusy = $state(false);
@@ -56,17 +55,20 @@
       appError = "Enter at least one redirect URI";
       return;
     }
+    const logoutUris = appLogoutUris.split("\n").map((u) => u.trim()).filter((u) => u.length > 0);
     appBusy = true;
     try {
       const resp = await api.post<{ clientSecret?: string }>(`/api/orgs/${orgId}/applications`, {
         name: appName.trim(),
         redirectUris: uris,
         isConfidential: appConfidential,
+        postLogoutRedirectUris: logoutUris,
       });
       if (resp.clientSecret) secret = resp.clientSecret;
       showCreate = false;
       appName = "";
       appUris = "";
+      appLogoutUris = "";
       await load();
     } catch (e) {
       appError = e instanceof Error ? e.message : "Could not create the application";
@@ -135,6 +137,11 @@
               <p class="aw-meta">
                 Redirect URIs: {app.redirectUris.join(", ")}
               </p>
+              {#if app.postLogoutRedirectUris?.length}
+                <p class="aw-meta">
+                  Post-logout redirect URIs: {app.postLogoutRedirectUris.join(", ")}
+                </p>
+              {/if}
               {#if app.isConfidential}
                 <p class="aw-meta">
                   Secret {app.secretPreview} · {manage ? "rotate to change" : ""}
@@ -160,6 +167,11 @@
       <label for="app-uris">Redirect URIs</label>
       <Textarea id="app-uris" bind:value={appUris} rows={3} placeholder="https://app.example.com/callback" />
       <p class="aw-field-hint">One per line. Must be https (http allowed for localhost).</p>
+    </div>
+    <div class="aw-form-field">
+      <label for="app-logout-uris">Post-logout redirect URIs</label>
+      <Textarea id="app-logout-uris" bind:value={appLogoutUris} rows={2} placeholder="https://app.example.com/logged-out" />
+      <p class="aw-field-hint">Optional. Where the browser lands after RP-initiated logout (OIDC end-session). One per line.</p>
     </div>
     <Checkbox bind:checked={appConfidential}>Confidential client (has a secret)</Checkbox>
     {#if appError}<p class="aw-field-error" role="alert">{appError}</p>{/if}

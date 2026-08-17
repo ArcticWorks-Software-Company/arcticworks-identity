@@ -7,6 +7,7 @@ export interface DiscoveryDocument {
   userinfo_endpoint: string;
   jwks_uri: string;
   revocation_endpoint: string;
+  end_session_endpoint?: string;
   response_types_supported: string[];
   grant_types_supported: string[];
   subject_types_supported: string[];
