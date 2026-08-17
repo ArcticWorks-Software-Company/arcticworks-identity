@@ -1,4 +1,4 @@
-FROM node:22-alpine AS build
+FROM node:26-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY apps/web/package.json apps/web/package.json
@@ -9,7 +9,7 @@ RUN npm ci --workspace apps/web --include-workspace-root
 COPY apps/web apps/web
 RUN npm run build:web
 
-FROM node:22-alpine
+FROM node:26-alpine
 WORKDIR /app
 ENV NODE_ENV=production PORT=3000
 COPY --from=build --chown=node:node /app/apps/web/build ./build
