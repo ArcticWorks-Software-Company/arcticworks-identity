@@ -50,6 +50,13 @@ services:
       SMTP_PASSWORD: ${SMTP_PASSWORD}
       SMTP_FROM: ${SMTP_FROM:-ArcticWorks Identity <no-reply@identity.example.com>}
       SMTP_TLS: ${SMTP_TLS:-starttls}
+      # Base64 32-byte key encrypting TOTP secrets at rest (openssl rand -base64 32).
+      # Unset = ephemeral key; existing TOTP enrollments stop working on restart.
+      TOTP_ENC_KEY: ${TOTP_ENC_KEY:-}
+      # Migrations run via the `migrate` job/CLI before rollout (forward-only,
+      # checksummed); auto-migrating at boot races across replicas.
+      AUTO_MIGRATE: "false"
+      DOCS_ENABLED: ${DOCS_ENABLED:-false}
       LOG_FORMAT: json
       RUST_LOG: info,tower_http=info,sqlx=warn
     depends_on:

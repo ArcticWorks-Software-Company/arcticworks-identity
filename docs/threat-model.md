@@ -22,12 +22,13 @@ codes, organization data, audit log, signing keys, email tokens.
 | A7 | Recovery code theft / guessing | Medium | Account takeover | Codes are 16 hex chars (64 bits), single-use, shown once, hashed at rest; rate-limited endpoint; regeneration invalidates old sets |
 | A8 | Reauthentication bypass | Low | Privilege escalation on sensitive actions | `last_reauth_at` window (10 min) enforced server-side on every sensitive action; reauth itself rate-limited by account |
 | A9 | Unverified email abuse | Medium | Spam/abuse | Login blocked until verification; tokens single-use with 24 h expiry |
+| A10 | Stolen password enables login despite MFA | Medium | Account takeover | Optional TOTP second factor (RFC 6238): password-correct logins receive a short-lived single-use challenge instead of a session; MFA codes are rate-limited per account; recovery codes and passkeys remain as independent factors |
 
 ## 2. Sessions
 
 | # | Threat | Likelihood | Impact | Mitigation |
 |---|--------|-----------|--------|------------|
-| S1 | Stolen cookie replay | Medium | Account takeover | Sessions revocable; fixed 30-day expiry; user can view and revoke sessions; password change and reset revoke all sessions |
+| S1 | Stolen cookie replay | Medium | Account takeover | Sessions revocable; fixed 30-day expiry; user can view and revoke sessions; password change and reset revoke all sessions and all OAuth access/refresh tokens |
 | S2 | CSRF on state-changing endpoints | Medium | Account manipulation | `SameSite=Lax` cookies; CORS allowlist with credentials; API state changes require `application/json` or form posts from same-site top-level navigations; Origin/Referer validation for cookie-authenticated mutations |
 | S3 | Cross-site cookie leakage | Low | Account takeover | `Secure` flag in production; no `Domain=` broadening |
 
@@ -51,16 +52,16 @@ codes, organization data, audit log, signing keys, email tokens.
 |---|--------|-----------|--------|------------|
 | T1 | Cross-tenant data access | Medium | Data breach | Every org-owned record carries `org_id`; every query is tenant-scoped; organization ids from clients are verified against the principal's membership before use (covered by integration tests) |
 | T2 | Privilege escalation (member → admin) | Medium | Org compromise | Deny-by-default permission checks on every administrative endpoint; Owner role only assignable via ownership transfer; Owner cannot be suspended/removed; integration tests cover escalation paths |
-| T3 | Suspended member retains access | Medium | Policy bypass | Membership status checked on every authorization; suspended members get `false` from the permission-check endpoint; sessions remain but org context is denied |
+| T3 | Suspended member retains access | Medium | Policy bypass | Membership status checked on every authorization **and on every access-token validation**; suspension and removal revoke the member's OAuth access and refresh tokens; the permission-check endpoint keeps denying by default |
 | T4 | Permission check across organizations | Medium | Cross-tenant authorization | The check endpoint binds the caller (service account/device) to its own organization; `organization_id` in the request must equal the token's org (403 otherwise) |
-| T5 | Service account / device credential theft | Medium | Org compromise | Short-lived credentials (90/365 days), rotatable, revocable; secret shown once, hashed at rest; device revocation kills client-credentials auth |
+| T5 | Service account / device credential theft | Medium | Org compromise | Short-lived credentials (90/365 days, **expiry enforced at authentication**), rotatable, revocable; secret shown once, hashed at rest; device revocation and suspended service accounts invalidate issued bearer tokens |
 | T6 | Enrollment token abuse | Medium | Unauthorized devices | Tokens single-use, 24 h expiry, hashed at rest, rate-limited enrollment; devices bound to one org (+ optional team) |
 
 ## 5. Data at rest and secrets
 
 | # | Threat | Likelihood | Impact | Mitigation |
 |---|--------|-----------|--------|------------|
-| D1 | Database dump exposes credentials | Low | Account compromise at scale | Argon2id for passwords; SHA-256 for all opaque tokens; client secrets/credentials/recovery codes stored hashed only; secrets never logged |
+| D1 | Database dump exposes credentials | Low | Account compromise at scale | Argon2id for passwords; SHA-256 for all opaque tokens; client secrets/credentials/recovery codes stored hashed only; TOTP seeds AES-256-GCM encrypted (key via `TOTP_ENC_KEY`); secrets never logged |
 | D2 | Log leakage of secrets | Medium | Token theft | Sensitive fields excluded from logs and error responses; panic handler logs only the message; audit log stores metadata, never tokens |
 | D3 | Signing key compromise | Low | Token forgery | Keys in the database (never on disk of ephemeral containers without backup); rotatable with documented runbook; JWKS publishes active + recently retired keys |
 | D4 | Weak token entropy | Low | Token guessing | 256-bit random tokens (OsRng) |
@@ -69,7 +70,7 @@ codes, organization data, audit log, signing keys, email tokens.
 
 | # | Threat | Likelihood | Impact | Mitigation |
 |---|--------|-----------|--------|------------|
-| V1 | Registration / login floods | Medium | DoS, spam accounts | Rate limits (registration 3/h/IP, login 10/min/IP + 10/15 min/account, reset 3/15 min/IP, enrollment 5/h/IP, token endpoint 30/min/IP) backed by Valkey |
+| V1 | Registration / login floods | Medium | DoS, spam accounts | Rate limits (registration 3/h/IP, login 10/min/IP + 10/15 min/account, reset 3/15 min/IP, enrollment 5/h/IP, token endpoint 30/min/IP, reauth and password change per account) backed by Valkey with in-memory fallback on Redis failure |
 | V2 | Mail bombing | Medium | Reputation | Resend-verification limited to 3/h/IP; invite creation limited per IP |
 | V3 | Audit log forgery | Low | Forensics loss | Append-only table; no UPDATE/DELETE paths in application code; events carry correlation ids |
 
@@ -77,9 +78,9 @@ codes, organization data, audit log, signing keys, email tokens.
 
 | # | Threat | Likelihood | Impact | Mitigation |
 |---|--------|-----------|--------|------------|
-| C1 | Compromised dependency | Low | Various | Minimal dependency surface (pure-Rust crypto where feasible — no OpenSSL); `Cargo.lock` and `package-lock.json` committed |
+| C1 | Compromised dependency | Low | Various | Minimal dependency surface (pure-Rust crypto where feasible — no OpenSSL); `Cargo.lock` and `package-lock.json` committed; CI runs `cargo check/test/build`, `npm audit` and `cargo audit` on every push |
 | C2 | Compromised administrator account | Medium | Full platform | Reauthentication required for sensitive actions; audit trail; ownership transfer requires reauth; suspended members lose all access |
-| C3 | Misconfigured deployment (plaintext cookies, weak TLS) | Medium | Account takeover | Deployment docs mandate TLS termination, `SECURE_COOKIES=true`, `TRUST_PROXY=true` behind the proxy; readiness checks |
+| C3 | Misconfigured deployment (plaintext cookies, weak TLS) | Medium | Account takeover | Deployment docs mandate TLS termination, `SECURE_COOKIES=true`, `TRUST_PROXY=true` behind the proxy; the proxy overwrites `X-Forwarded-For` with its own peer address and the API accepts it only when `TRUST_PROXY` is set; nginx sends HSTS and frame/mime/type headers; readiness checks |
 
 ## 8. Assumptions
 
