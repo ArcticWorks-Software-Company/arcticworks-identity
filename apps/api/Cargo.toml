@@ -39,7 +39,7 @@ thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-jsonwebtoken = "9"
+jsonwebtoken = "11"
 rsa = { version = "0.9", features = ["pem", "sha2"] }
 ciborium = "0.2"
 p256 = "0.13"
