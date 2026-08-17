@@ -3,8 +3,7 @@
 //! plus keys retired within the last 24 hours (validation grace period).
 
 use base64::Engine;
-use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey};
-use rsa::pkcs8::EncodePrivateKey;
+use jsonwebtoken::{DecodingKey, EncodingKey};
 use rsa::traits::PublicKeyParts;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -44,6 +43,22 @@ pub async fn active_key(pool: &PgPool) -> ApiResult<Option<SigningKeyRow>> {
     .await
     .map_internal("load active signing key")?;
     Ok(key)
+}
+
+/// Keys eligible for token verification: the active key and recently
+/// retired keys kept during the rotation grace period.
+pub async fn verification_keys(pool: &PgPool) -> ApiResult<Vec<SigningKeyRow>> {
+    sqlx::query_as::<_, SigningKeyRow>(
+        r#"
+        SELECT * FROM oidc_signing_keys
+        WHERE retired_at IS NULL OR retired_at > now() - make_interval(hours => $1::int)
+        ORDER BY created_at DESC
+        "#,
+    )
+    .bind(KEY_GRACE_HOURS)
+    .fetch_all(pool)
+    .await
+    .map_internal("load signing keys for verification")
 }
 
 /// Retire the current key (if any) and generate a fresh one.
@@ -185,17 +200,7 @@ fn pem_encode(kind: &str, der: &[u8]) -> Vec<u8> {
 
 /// JWKS document: active keys plus recently retired ones.
 pub async fn jwks(pool: &PgPool) -> ApiResult<serde_json::Value> {
-    let keys = sqlx::query_as::<_, SigningKeyRow>(
-        r#"
-        SELECT * FROM oidc_signing_keys
-        WHERE retired_at IS NULL OR retired_at > now() - make_interval(hours => $1)
-        ORDER BY created_at DESC
-        "#,
-    )
-    .bind(KEY_GRACE_HOURS)
-    .fetch_all(pool)
-    .await
-    .map_internal("load signing keys for JWKS")?;
+    let keys = verification_keys(pool).await?;
 
     let keys: Vec<serde_json::Value> = keys
         .into_iter()

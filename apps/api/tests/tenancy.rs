@@ -55,13 +55,16 @@ async fn privilege_escalation_is_denied_and_roles_apply(pool: PgPool) {
     let owner = create_user(&pool, "owner@example.com", "password-123").await;
     let viewer = create_user(&pool, "viewer@example.com", "password-123").await;
     let member = create_user(&pool, "member@example.com", "password-123").await;
+    let administrator = create_user(&pool, "administrator@example.com", "password-123").await;
     let outsider = create_user(&pool, "outsider@example.com", "password-123").await;
     let org = create_org(&pool, "Acme", "acme", owner).await;
     add_member(&pool, org, viewer, "Viewer").await;
     add_member(&pool, org, member, "Member").await;
+    add_member(&pool, org, administrator, "Administrator").await;
 
     let session_viewer = login_existing(&router, "viewer@example.com", "password-123").await;
     let session_member = login_existing(&router, "member@example.com", "password-123").await;
+    let session_administrator = login_existing(&router, "administrator@example.com", "password-123").await;
     let session_owner = login_existing(&router, "owner@example.com", "password-123").await;
     let session_outsider = login_existing(&router, "outsider@example.com", "password-123").await;
 
@@ -131,11 +134,19 @@ async fn privilege_escalation_is_denied_and_roles_apply(pool: PgPool) {
     .await;
     assert_eq!(resp.status(), StatusCode::CREATED);
     let role_id = body_json(resp).await["role"]["id"].as_str().unwrap().to_string();
-
-    let member_id: uuid::Uuid = sqlx::query_scalar("SELECT id FROM users WHERE email = 'member@example.com'")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let member_id: uuid::Uuid =
+        sqlx::query_scalar("SELECT id FROM users WHERE email = 'member@example.com'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    request_as(
+        &router,
+        "POST",
+        "/api/auth/reauth",
+        &session_owner,
+        Some(serde_json::json!({ "password": "password-123" })),
+    )
+    .await;
     let resp = request_as(
         &router,
         "POST",
@@ -184,6 +195,71 @@ async fn privilege_escalation_is_denied_and_roles_apply(pool: PgPool) {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // An administrator cannot demote or suspend the canonical owner. Owner
+    // changes must go through the dedicated ownership-transfer flow.
+    let member_role: uuid::Uuid = sqlx::query_scalar(
+        "SELECT id FROM roles WHERE org_id = $1 AND name = 'Member'",
+    )
+    .bind(org)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let resp = request_as(
+        &router,
+        "POST",
+        &format!("/api/orgs/{org}/members/{owner}/role"),
+        &session_administrator,
+        Some(serde_json::json!({ "roleId": member_role })),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "sensitive member changes require reauthentication"
+    );
+    request_as(
+        &router,
+        "POST",
+        "/api/auth/reauth",
+        &session_administrator,
+        Some(serde_json::json!({ "password": "password-123" })),
+    )
+    .await;
+    let resp = request_as(
+        &router,
+        "POST",
+        &format!("/api/orgs/{org}/members/{owner}/role"),
+        &session_administrator,
+        Some(serde_json::json!({ "roleId": member_role })),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let resp = request_as(
+        &router,
+        "POST",
+        &format!("/api/orgs/{org}/members/{owner}/suspend"),
+        &session_administrator,
+        None,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let owner_membership: (String, bool) = sqlx::query_as(
+        r#"
+        SELECT m.status, r.is_owner
+        FROM org_memberships m
+        JOIN roles r ON r.id = m.role_id
+        WHERE m.org_id = $1 AND m.user_id = $2
+        "#,
+    )
+    .bind(org)
+    .bind(owner)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(owner_membership, ("active".to_string(), true));
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -198,6 +274,14 @@ async fn suspended_members_lose_all_access(pool: PgPool) {
     let session_owner = login_existing(&router, "owner@example.com", "password-123").await;
     let session_victim = login_existing(&router, "victim@example.com", "password-123").await;
 
+    request_as(
+        &router,
+        "POST",
+        "/api/auth/reauth",
+        &session_owner,
+        Some(serde_json::json!({ "password": "password-123" })),
+    )
+    .await;
     let resp = request_as(
         &router,
         "POST",

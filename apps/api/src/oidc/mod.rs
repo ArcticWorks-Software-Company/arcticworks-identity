@@ -45,6 +45,7 @@ pub struct OidcClientRow {
     pub client_secret_hash: Option<String>,
     pub secret_preview: String,
     pub redirect_uris: serde_json::Value,
+    pub post_logout_redirect_uris: serde_json::Value,
     pub is_confidential: bool,
     pub application_enabled: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -58,9 +59,17 @@ pub struct ApplicationJson {
     pub client_id: String,
     pub is_confidential: bool,
     pub redirect_uris: Vec<String>,
+    pub post_logout_redirect_uris: Vec<String>,
     pub application_enabled: bool,
     pub secret_preview: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+fn json_str_list(value: &serde_json::Value) -> Vec<String> {
+    value
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(ToOwned::to_owned)).collect())
+        .unwrap_or_default()
 }
 
 impl From<OidcClientRow> for ApplicationJson {
@@ -70,11 +79,8 @@ impl From<OidcClientRow> for ApplicationJson {
             name: c.name,
             client_id: c.client_id,
             is_confidential: c.is_confidential,
-            redirect_uris: c
-                .redirect_uris
-                .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(ToOwned::to_owned)).collect())
-                .unwrap_or_default(),
+            redirect_uris: json_str_list(&c.redirect_uris),
+            post_logout_redirect_uris: json_str_list(&c.post_logout_redirect_uris),
             application_enabled: c.application_enabled,
             secret_preview: c.secret_preview,
             created_at: c.created_at,
@@ -91,6 +97,8 @@ pub struct CreateApplicationReq {
     pub redirect_uris: Vec<String>,
     #[serde(default)]
     pub is_confidential: bool,
+    #[serde(default)]
+    pub post_logout_redirect_uris: Vec<String>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -102,6 +110,8 @@ pub struct UpdateApplicationReq {
     pub redirect_uris: Option<Vec<String>>,
     #[serde(default)]
     pub application_enabled: Option<bool>,
+    #[serde(default)]
+    pub post_logout_redirect_uris: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -157,6 +167,7 @@ pub fn routes() -> Router<AppState> {
         .route("/oidc/token", post(token_endpoint))
         .route("/oidc/userinfo", get(userinfo))
         .route("/oidc/revoke", post(revoke))
+        .route("/oidc/end-session", get(end_session).post(end_session_post))
         .route(
             "/api/orgs/{org_id}/applications",
             get(list_applications).post(create_application),
@@ -187,6 +198,7 @@ async fn discovery(State(state): State<AppState>) -> ApiResult<Response> {
         "userinfo_endpoint": format!("{iss}/oidc/userinfo"),
         "jwks_uri": format!("{iss}/oidc/jwks.json"),
         "revocation_endpoint": format!("{iss}/oidc/revoke"),
+        "end_session_endpoint": format!("{iss}/oidc/end-session"),
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token", "client_credentials"],
         "subject_types_supported": ["public"],
@@ -597,6 +609,10 @@ async fn token_auth_code(
         return Err(oauth_token_error("invalid_grant", "PKCE verification failed"));
     }
 
+    if !rbac::is_active_member(&state.pool, code_row.user_id, code_row.org_id).await? {
+        return Err(oauth_token_error("invalid_grant", "membership is not active"));
+    }
+
     // Single use.
     let consumed = sqlx::query("UPDATE auth_codes SET used_at = now() WHERE id = $1 AND used_at IS NULL")
         .bind(code_row.id)
@@ -680,28 +696,36 @@ async fn token_refresh(
         return Err(oauth_token_error("invalid_grant", "refresh token expired"));
     }
 
+    if row.actor_type == "user" {
+        let org_id = row.org_id.ok_or_else(|| oauth_token_error("invalid_grant", "refresh token has no organization"))?;
+        if !rbac::is_active_member(&state.pool, row.actor_id, org_id).await? {
+            return Err(oauth_token_error("invalid_grant", "membership is not active"));
+        }
+    }
+
     // Rotation + reuse detection.
-    let (new_refresh, actor_org) = if row.revoked_at.is_some() {
-        // Reuse of a rotated token: revoke the whole family.
-        token::revoke_family(state, row.family_id).await?;
-        audit::record(
-            &state.pool,
-            meta,
-            AuditEvent {
-                event_type: "oauth.refresh_token_reuse",
-                actor_type: ActorType::User,
-                actor_id: Some(row.actor_id),
-                org_id: row.org_id,
-                target_type: None,
-                target_id: None,
-                metadata: serde_json::json!({ "clientId": client.client_id }),
-            },
-        )
-        .await;
-        return Err(oauth_token_error("invalid_grant", "refresh token reuse detected; family revoked"));
-    } else {
-        let new = token::rotate_refresh_token(state, &row).await?;
-        (Some(new), row.org_id)
+    let (new_refresh, actor_org) = match token::rotate_refresh_token(state, &row).await? {
+        token::RotateRefreshOutcome::Rotated(new) => (Some(new), row.org_id),
+        token::RotateRefreshOutcome::ReuseDetected => {
+            audit::record(
+                &state.pool,
+                meta,
+                AuditEvent {
+                    event_type: "oauth.refresh_token_reuse",
+                    actor_type: ActorType::User,
+                    actor_id: Some(row.actor_id),
+                    org_id: row.org_id,
+                    target_type: None,
+                    target_id: None,
+                    metadata: serde_json::json!({ "clientId": client.client_id }),
+                },
+            )
+            .await;
+            return Err(oauth_token_error("invalid_grant", "refresh token reuse detected; family revoked"));
+        }
+        token::RotateRefreshOutcome::Revoked => {
+            return Err(oauth_token_error("invalid_grant", "refresh token is revoked"));
+        }
     };
 
     let scopes: Vec<String> = row
@@ -925,6 +949,125 @@ async fn revoke(
     Ok(StatusCode::OK.into_response())
 }
 
+// --------------------------------------------------------- RP-initiated logout
+
+/// OIDC RP-Initiated Logout 1.0. Ends the browser session identified by the
+/// session cookie (validated against an optional `id_token_hint`) and
+/// redirects only to a registered post-logout redirect URI.
+async fn end_session(
+    State(state): State<AppState>,
+    meta: HttpMeta,
+    authed: OptAuthed,
+    Query(query): Query<HashMap<String, String>>,
+) -> ApiResult<Response> {
+    end_session_inner(&state, &meta, authed.0, &query).await
+}
+
+async fn end_session_post(
+    State(state): State<AppState>,
+    meta: HttpMeta,
+    authed: OptAuthed,
+    Form(form): Form<HashMap<String, String>>,
+) -> ApiResult<Response> {
+    end_session_inner(&state, &meta, authed.0, &form).await
+}
+
+async fn end_session_inner(
+    state: &AppState,
+    meta: &HttpMeta,
+    authed: Option<authn::SessionUser>,
+    params: &HashMap<String, String>,
+) -> ApiResult<Response> {
+    let hint = params
+        .get("id_token_hint")
+        .cloned()
+        .filter(|s| !s.is_empty());
+    let post_logout = params
+        .get("post_logout_redirect_uri")
+        .cloned()
+        .filter(|s| !s.is_empty());
+    let state_param = params.get("state").cloned().filter(|s| !s.is_empty());
+    let client_param = params.get("client_id").cloned().filter(|s| !s.is_empty());
+
+    // Validate the ID token hint first; an invalid hint is rejected without
+    // any redirect (the logout must not proceed on an attacker's say-so).
+    let mut hint_client: Option<String> = None;
+    let mut hint_user: Option<Uuid> = None;
+    if let Some(hint) = &hint {
+        match token::validate_id_token_hint(state, hint).await {
+            Ok((client_id, user_id)) => {
+                hint_client = Some(client_id);
+                hint_user = Some(user_id);
+            }
+            Err(_) => {
+                return Ok(client_error_page("invalid_request", "invalid id_token_hint"));
+            }
+        }
+    }
+
+    // The client that vouches for the logout: the hint's audience, or an
+    // explicit client_id parameter.
+    let effective_client = hint_client.clone().or(client_param);
+
+    // End the browser session when the hint subject matches the current
+    // session user, or when no hint was given and a session is present.
+    let session_user = authed.as_ref().map(|su| (su.user.id, su.session.id));
+    let should_logout = match (hint_user, session_user) {
+        (Some(hint_id), Some((session_user_id, _))) => hint_id == session_user_id,
+        (None, Some(_)) => true,
+        _ => false,
+    };
+    if let Some((_, session_id)) = session_user {
+        if should_logout {
+            authn::revoke_session(&state.pool, session_id).await?;
+            audit::record(
+                &state.pool,
+                meta,
+                AuditEvent {
+                    event_type: "auth.logout_rp",
+                    actor_type: ActorType::User,
+                    actor_id: authed.as_ref().map(|su| su.user.id),
+                    org_id: None,
+                    target_type: Some("session"),
+                    target_id: Some(session_id),
+                    metadata: serde_json::json!({ "clientId": effective_client }),
+                },
+            )
+            .await;
+        }
+    }
+
+    // Redirect only to registered post-logout URIs.
+    if let Some(target) = &post_logout {
+        let Some(client_id) = effective_client else {
+            return Ok(client_error_page(
+                "invalid_request",
+                "post_logout_redirect_uri requires a known client",
+            ));
+        };
+        let Some(client) = load_client(state, &client_id).await? else {
+            return Ok(client_error_page("invalid_request", "unknown client"));
+        };
+        if !json_str_list(&client.post_logout_redirect_uris)
+            .iter()
+            .any(|uri| uri == target)
+        {
+            return Ok(client_error_page(
+                "invalid_request",
+                "post_logout_redirect_uri is not registered for this client",
+            ));
+        }
+        let mut url = target.clone();
+        if let Some(state_val) = &state_param {
+            let separator = if url.contains('?') { '&' } else { '?' };
+            url.push_str(&format!("{separator}state={}", urlencode(state_val)));
+        }
+        return Ok(Redirect::to(&url).into_response());
+    }
+
+    Ok(Json(serde_json::json!({ "ok": true })).into_response())
+}
+
 // ------------------------------------------------------- application management
 
 /// List OIDC applications of an organization (requires `org.apps.read`).
@@ -983,12 +1126,14 @@ pub async fn create_application(
         return Err(ApiError::RateLimited { retry_after_secs: retry });
     }
     rbac::authorize(&state.pool, authed.0.user.id, org_id, rbac::perms::APPS_MANAGE).await?;
+    authed.0.require_reauth(&state.config)?;
 
     let name = req.name.trim();
     if name.is_empty() || name.chars().count() > 100 {
         return Err(ApiError::Validation("application name must be between 1 and 100 characters".into()));
     }
     let redirect_uris = validate_redirect_uris(&req.redirect_uris)?;
+    let post_logout_redirect_uris = validate_post_logout_uris(&req.post_logout_redirect_uris)?;
 
     let client_id = format!("awapp_{}", new_id().simple());
     let (secret_hash, secret_preview_val, secret) = if req.is_confidential {
@@ -1002,8 +1147,9 @@ pub async fn create_application(
     sqlx::query(
         r#"
         INSERT INTO oidc_clients (id, org_id, name, client_id, client_secret_hash,
-                                  secret_preview, redirect_uris, is_confidential, created_by)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                                  secret_preview, redirect_uris, post_logout_redirect_uris,
+                                  is_confidential, created_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         "#,
     )
     .bind(id)
@@ -1013,6 +1159,7 @@ pub async fn create_application(
     .bind(&secret_hash)
     .bind(&secret_preview_val)
     .bind(serde_json::to_value(&redirect_uris).unwrap_or_else(|_| serde_json::json!([])))
+    .bind(serde_json::to_value(&post_logout_redirect_uris).unwrap_or_else(|_| serde_json::json!([])))
     .bind(req.is_confidential)
     .bind(authed.0.user.id)
     .execute(&state.pool)
@@ -1041,6 +1188,7 @@ pub async fn create_application(
                 "id": id, "name": name, "clientId": client_id,
                 "isConfidential": req.is_confidential,
                 "redirectUris": redirect_uris,
+                "postLogoutRedirectUris": post_logout_redirect_uris,
             },
             "clientSecret": secret.as_ref().map(|s| s.expose_secret().clone()),
         })),
@@ -1073,6 +1221,7 @@ pub async fn update_application(
     Json(req): Json<UpdateApplicationReq>,
 ) -> ApiResult<Response> {
     rbac::authorize(&state.pool, authed.0.user.id, org_id, rbac::perms::APPS_MANAGE).await?;
+    authed.0.require_reauth(&state.config)?;
 
     let mut changes: Vec<String> = Vec::new();
     let mut bind_idx = 1usize;
@@ -1096,6 +1245,12 @@ pub async fn update_application(
         sql.push_str(&format!("application_enabled = ${bind_idx}, "));
         bind_idx += 1;
         changes.push(if enabled { "true".into() } else { "false".into() });
+    }
+    if let Some(uris) = &req.post_logout_redirect_uris {
+        let uris = validate_post_logout_uris(uris)?;
+        sql.push_str(&format!("post_logout_redirect_uris = ${bind_idx}, "));
+        bind_idx += 1;
+        changes.push(serde_json::to_string(&uris).unwrap_or_else(|_| "[]".into()));
     }
     sql.push_str("updated_at = now() WHERE client_id = $");
     sql.push_str(&bind_idx.to_string());
@@ -1276,9 +1431,10 @@ pub async fn delete_application(
 async fn account_applications(State(state): State<AppState>, authed: Authed) -> ApiResult<Response> {
     let grants = sqlx::query_as::<_, GrantRow>(
         r#"
-        SELECT g.id, g.client_id, c.name, g.scopes, g.created_at, g.org_id
+        SELECT g.id, g.client_id, c.name, g.scopes, g.created_at, o.name AS org_name
         FROM oauth_grants g
         JOIN oidc_clients c ON c.client_id = g.client_id
+        JOIN organizations o ON o.id = g.org_id
         WHERE g.user_id = $1 AND g.revoked_at IS NULL
         ORDER BY g.created_at DESC
         "#,
@@ -1288,11 +1444,6 @@ async fn account_applications(State(state): State<AppState>, authed: Authed) -> 
     .await
     .map_internal("list account applications")?;
 
-    let org_names: Vec<(Uuid, String)> = sqlx::query_as("SELECT id, name FROM organizations")
-        .fetch_all(&state.pool)
-        .await
-        .map_internal("load organizations")?;
-
     let items: Vec<serde_json::Value> = grants
         .into_iter()
         .map(|g| {
@@ -1301,7 +1452,7 @@ async fn account_applications(State(state): State<AppState>, authed: Authed) -> 
                 "clientId": g.client_id,
                 "name": g.name,
                 "scopes": g.scopes,
-                "orgName": org_names.iter().find(|(id, _)| *id == g.org_id).map(|(_, n)| n),
+                "orgName": g.org_name,
                 "grantedAt": g.created_at,
             })
         })
@@ -1317,7 +1468,7 @@ struct GrantRow {
     name: String,
     scopes: serde_json::Value,
     created_at: chrono::DateTime<chrono::Utc>,
-    org_id: Uuid,
+    org_name: String,
 }
 
 async fn revoke_account_grant(
@@ -1440,7 +1591,8 @@ fn oauth_redirect_error(
     error: &str,
     description: &str,
 ) -> Response {
-    let mut url = format!("{redirect_uri}?error={error}");
+    let separator = if redirect_uri.contains('?') { '&' } else { '?' };
+    let mut url = format!("{redirect_uri}{separator}error={error}");
     if let Some(state) = state {
         url.push_str(&format!("&state={}", urlencode(state)));
     }
@@ -1537,6 +1689,17 @@ fn validate_redirect_uris(uris: &[String]) -> ApiResult<Vec<String>> {
     for uri in uris {
         if !util::is_valid_redirect_uri(uri) {
             return Err(ApiError::Validation(format!("invalid redirect URI: {uri}")));
+        }
+    }
+    Ok(uris.to_vec())
+}
+
+/// Post-logout redirect URIs follow the same policy as redirect URIs
+/// (https, or http for loopback) but may be empty.
+fn validate_post_logout_uris(uris: &[String]) -> ApiResult<Vec<String>> {
+    for uri in uris {
+        if !util::is_valid_redirect_uri(uri) {
+            return Err(ApiError::Validation(format!("invalid post-logout redirect URI: {uri}")));
         }
     }
     Ok(uris.to_vec())

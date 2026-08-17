@@ -22,6 +22,7 @@ pub mod ratelimit;
 pub mod rbac;
 pub mod state;
 pub mod tokens;
+pub mod totp;
 pub mod util;
 
 use axum::http::header;
@@ -57,7 +58,12 @@ pub fn app(state: state::AppState) -> Router {
         .merge(oidc::routes())
         .merge(passkeys::routes())
         .merge(rbac::routes())
-        .merge(openapi::routes());
+        .merge(totp::routes())
+        .merge(if state.config.docs_enabled {
+            openapi::routes()
+        } else {
+            Router::new()
+        });
 
     Router::new()
         .route("/healthz", get(healthz))

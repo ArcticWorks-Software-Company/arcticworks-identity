@@ -624,10 +624,27 @@ struct MemberRow {
     joined_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// A member target that is not the owner and not the caller.
-fn validate_member_target(principal: &rbac::OrgPrincipal, target_user_id: Uuid) -> ApiResult<()> {
+/// A member target that is not the canonical owner and not the caller.
+async fn validate_member_target(
+    state: &AppState,
+    principal: &rbac::OrgPrincipal,
+    target_user_id: Uuid,
+) -> ApiResult<()> {
     if target_user_id == principal.user_id {
         return Err(ApiError::Validation("cannot modify your own membership this way".into()));
+    }
+    let is_owner = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM organizations WHERE id = $1 AND owner_id = $2)",
+    )
+    .bind(principal.org_id)
+    .bind(target_user_id)
+    .fetch_one(&state.pool)
+    .await
+    .map_internal("check target is owner")?;
+    if is_owner {
+        return Err(ApiError::Validation(
+            "the owner can only be changed via ownership transfer".into(),
+        ));
     }
     Ok(())
 }
@@ -657,7 +674,8 @@ pub async fn set_member_role(
     Json(req): Json<SetRoleReq>,
 ) -> ApiResult<Response> {
     let principal = rbac::authorize(&state.pool, authed.0.user.id, org_id, rbac::perms::MEMBERS_MANAGE).await?;
-    validate_member_target(&principal, user_id)?;
+    authed.0.require_reauth(&state.config)?;
+    validate_member_target(&state, &principal, user_id).await?;
 
     // Role must belong to this organization.
     let role_org: Option<Uuid> = sqlx::query_scalar("SELECT org_id FROM roles WHERE id = $1")
@@ -733,7 +751,8 @@ pub async fn suspend_member(
     Path((org_id, user_id)): Path<(Uuid, Uuid)>,
 ) -> ApiResult<Response> {
     let principal = rbac::authorize(&state.pool, authed.0.user.id, org_id, rbac::perms::MEMBERS_SUSPEND).await?;
-    validate_member_target(&principal, user_id)?;
+    authed.0.require_reauth(&state.config)?;
+    validate_member_target(&state, &principal, user_id).await?;
     update_member_status(&state, &meta, authed.0.user.id, org_id, user_id, "suspended").await
 }
 
@@ -758,7 +777,8 @@ pub async fn unsuspend_member(
     Path((org_id, user_id)): Path<(Uuid, Uuid)>,
 ) -> ApiResult<Response> {
     let principal = rbac::authorize(&state.pool, authed.0.user.id, org_id, rbac::perms::MEMBERS_SUSPEND).await?;
-    validate_member_target(&principal, user_id)?;
+    authed.0.require_reauth(&state.config)?;
+    validate_member_target(&state, &principal, user_id).await?;
     update_member_status(&state, &meta, authed.0.user.id, org_id, user_id, "active").await
 }
 
@@ -781,6 +801,9 @@ async fn update_member_status(
     .map_internal("update member status")?;
     if res.rows_affected() == 0 {
         return Err(ApiError::NotFound);
+    }
+    if status == "suspended" {
+        crate::oidc::token::revoke_user_tokens(state, user_id, Some(org_id)).await?;
     }
 
     audit::record(
@@ -825,13 +848,14 @@ pub async fn remove_member(
     let principal = rbac::authorize(&state.pool, authed.0.user.id, org_id, rbac::perms::MEMBERS_REMOVE).await?;
 
     // Anyone may leave an organization themselves; admins may remove others
-    // (never the owner).
+    // (never the owner, and only after reauthentication).
     if user_id != principal.user_id {
-        validate_member_target(&principal, user_id)?;
+        authed.0.require_reauth(&state.config)?;
+        validate_member_target(&state, &principal, user_id).await?;
     }
 
     let is_owner = sqlx::query_scalar::<_, bool>(
-        "SELECT COALESCE((SELECT r.is_owner FROM org_memberships m LEFT JOIN roles r ON r.id = m.role_id WHERE m.org_id = $1 AND m.user_id = $2), false)",
+        "SELECT EXISTS(SELECT 1 FROM organizations WHERE id = $1 AND owner_id = $2)",
     )
     .bind(org_id)
     .bind(user_id)
@@ -851,6 +875,7 @@ pub async fn remove_member(
     if res.rows_affected() == 0 {
         return Err(ApiError::NotFound);
     }
+    crate::oidc::token::revoke_user_tokens(&state, user_id, Some(org_id)).await?;
 
     audit::record(
         &state.pool,
@@ -1487,9 +1512,20 @@ async fn add_team_member(
 ) -> ApiResult<Response> {
     rbac::authorize(&state.pool, authed.0.user.id, org_id, rbac::perms::TEAMS_MANAGE).await?;
 
-    // Target must be an org member.
+    // Target must be an org member, and the team must belong to this org.
     if !rbac::is_active_member(&state.pool, req.user_id, org_id).await? {
         return Err(ApiError::Validation("user is not an active member of this organization".into()));
+    }
+    let team_ok = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM teams WHERE id = $1 AND org_id = $2)",
+    )
+    .bind(team_id)
+    .bind(org_id)
+    .fetch_one(&state.pool)
+    .await
+    .map_internal("check team")?;
+    if !team_ok {
+        return Err(ApiError::Validation("team does not belong to this organization".into()));
     }
 
     let res = sqlx::query(

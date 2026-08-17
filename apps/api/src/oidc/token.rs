@@ -1,8 +1,8 @@
 //! OIDC token minting and validation (RS256).
 
 use base64::Engine;
-use jsonwebtoken::{encode, decode, DecodingKey, EncodingKey, Header, Validation};
-use serde::{Deserialize, Serialize};
+use jsonwebtoken::{decode, decode_header, encode, Algorithm, Header, Validation};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -88,7 +88,9 @@ pub async fn mint_access_token(state: &AppState, req: &TokenRequest) -> ApiResul
         scope: req.scopes.join(" "),
     };
 
-    let token = encode(&Header::new(jsonwebtoken::Algorithm::RS256), &claims, &keys::encoding_key(&key)?)
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(key.kid.clone());
+    let token = encode(&header, &claims, &keys::encoding_key(&key)?)
         .map_err(|e| ApiError::internal("mint access token", e))?;
 
     sqlx::query(
@@ -132,7 +134,9 @@ async fn mint_id_token(state: &AppState, req: &TokenRequest, access_token: &str)
         email_verified: if wants("email") { req.user.as_ref().map(|u| u.email_verified) } else { None },
     };
 
-    encode(&Header::new(jsonwebtoken::Algorithm::RS256), &claims, &keys::encoding_key(&key)?)
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(key.kid.clone());
+    encode(&header, &claims, &keys::encoding_key(&key)?)
         .map_err(|e| ApiError::internal("mint id token", e))
 }
 
@@ -223,20 +227,34 @@ pub async fn validate_access_token(
     token: &str,
     expected_audience: Option<&str>,
 ) -> ApiResult<ValidatedToken> {
-    let key = keys::ensure_active_key(&state.pool).await?;
-    let decoding_key = keys::decoding_key(&key)?;
+    let header = decode_header(token).map_err(|_| ApiError::Unauthorized)?;
+    if header.alg != Algorithm::RS256 {
+        return Err(ApiError::Unauthorized);
+    }
 
-    let mut validation = Validation::new(jsonwebtoken::Algorithm::RS256);
+    // First boot may not have a key yet. Keep verification aligned with JWKS:
+    // active plus recently retired keys, selected by kid when present.
+    keys::ensure_active_key(&state.pool).await?;
+    let verification_keys = keys::verification_keys(&state.pool).await?;
+
+    let mut validation = Validation::new(Algorithm::RS256);
     validation.set_issuer(&[state.config.issuer().to_string()]);
     validation.validate_exp = true;
     validation.validate_nbf = false;
     // Audience is checked explicitly below (optional expected audience).
     validation.validate_aud = false;
 
-    let data = decode::<serde_json::Value>(token, &decoding_key, &validation).map_err(|e| {
-        tracing::error!(error = %e, "access token validation failed");
-        ApiError::Unauthorized
-    })?;
+    let data = verification_keys
+        .iter()
+        .filter(|key| header.kid.as_ref().is_none_or(|kid| kid == &key.kid))
+        .find_map(|key| {
+            let decoding_key = keys::decoding_key(key).ok()?;
+            decode::<serde_json::Value>(token, &decoding_key, &validation).ok()
+        })
+        .ok_or_else(|| {
+            tracing::warn!(kid = header.kid.as_deref().unwrap_or("missing"), "access token validation failed");
+            ApiError::Unauthorized
+        })?;
     let claims = &data.claims;
 
     let aud = claims.get("aud").and_then(|v| v.as_str()).unwrap_or("");
@@ -267,15 +285,64 @@ pub async fn validate_access_token(
         .map(|s| s.split(' ').map(ToOwned::to_owned).collect())
         .unwrap_or_default();
 
-    // RFC 7009: revoked access tokens must be rejected.
-    let revoked = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM access_token_records WHERE jti = $1 AND revoked_at IS NOT NULL)",
+    // The jti table is an allowlist as well as the RFC 7009 revocation store.
+    let record = sqlx::query_as::<_, (
+        String,
+        Uuid,
+        Option<Uuid>,
+        Option<String>,
+        chrono::DateTime<chrono::Utc>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    )>(
+        r#"
+        SELECT actor_type, actor_id, org_id, client_id, expires_at, revoked_at
+        FROM access_token_records
+        WHERE jti = $1
+        "#,
     )
     .bind(jti)
-    .fetch_one(&state.pool)
+    .fetch_optional(&state.pool)
     .await
-    .map_internal("check access token revocation")?;
-    if revoked {
+    .map_internal("load access token record")?
+    .ok_or(ApiError::Unauthorized)?;
+    if record.5.is_some()
+        || record.4 <= chrono::Utc::now()
+        || record.0 != actor_type
+        || record.1 != sub
+        || record.2 != org_id
+        || record.3.as_deref() != Some(client_id.as_str())
+    {
+        return Err(ApiError::Unauthorized);
+    }
+
+    let Some(actor_org) = org_id else {
+        return Err(ApiError::Unauthorized);
+    };
+    let actor_active = match actor_type.as_str() {
+        "user" => crate::rbac::is_active_member(&state.pool, sub, actor_org).await?,
+        "service_account" => {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM service_accounts WHERE id = $1 AND org_id = $2 AND status = 'active')",
+            )
+            .bind(sub)
+            .bind(actor_org)
+            .fetch_one(&state.pool)
+            .await
+            .map_internal("check service account status")?
+        }
+        "device" => {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM devices WHERE id = $1 AND org_id = $2 AND status = 'active')",
+            )
+            .bind(sub)
+            .bind(actor_org)
+            .fetch_one(&state.pool)
+            .await
+            .map_internal("check device status")?
+        }
+        _ => false,
+    };
+    if !actor_active {
         return Err(ApiError::Unauthorized);
     }
 
@@ -288,6 +355,46 @@ pub async fn validate_access_token(
         client_id,
         scopes,
     })
+}
+
+/// Validate an ID token presented as an RP-initiated logout hint.
+/// Returns `(client_id, subject)`.
+pub async fn validate_id_token_hint(state: &AppState, token: &str) -> ApiResult<(String, Uuid)> {
+    let header = decode_header(token).map_err(|_| ApiError::Unauthorized)?;
+    if header.alg != Algorithm::RS256 {
+        return Err(ApiError::Unauthorized);
+    }
+    keys::ensure_active_key(&state.pool).await?;
+    let verification_keys = keys::verification_keys(&state.pool).await?;
+
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.set_issuer(&[state.config.issuer().to_string()]);
+    validation.validate_exp = true;
+    validation.validate_nbf = false;
+    validation.validate_aud = false;
+
+    let data = verification_keys
+        .iter()
+        .filter(|key| header.kid.as_ref().is_none_or(|kid| kid == &key.kid))
+        .find_map(|key| {
+            let decoding_key = keys::decoding_key(key).ok()?;
+            decode::<serde_json::Value>(token, &decoding_key, &validation).ok()
+        })
+        .ok_or(ApiError::Unauthorized)?;
+
+    let aud = data
+        .claims
+        .get("aud")
+        .and_then(|v| v.as_str())
+        .ok_or(ApiError::Unauthorized)?
+        .to_string();
+    let sub = data
+        .claims
+        .get("sub")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .ok_or(ApiError::Unauthorized)?;
+    Ok((aud, sub))
 }
 
 /// Look up a refresh token row by plaintext (hashed comparison).
@@ -327,33 +434,94 @@ pub struct RefreshTokenRow {
     pub reuse_detected_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-/// Revoke an entire refresh token family (reuse detection).
-pub async fn revoke_family(state: &AppState, family_id: Uuid) -> ApiResult<()> {
+/// Revoke a user's OAuth tokens globally or within one organization.
+pub async fn revoke_user_tokens(state: &AppState, user_id: Uuid, org_id: Option<Uuid>) -> ApiResult<()> {
     sqlx::query(
         r#"
         UPDATE refresh_tokens
-        SET revoked_at = now(), reuse_detected_at = now()
-        WHERE family_id = $1 AND revoked_at IS NULL
+        SET revoked_at = now()
+        WHERE actor_type = 'user' AND actor_id = $1
+          AND ($2::uuid IS NULL OR org_id = $2)
+          AND revoked_at IS NULL
         "#,
     )
-    .bind(family_id)
+    .bind(user_id)
+    .bind(org_id)
     .execute(&state.pool)
     .await
-    .map_internal("revoke refresh token family")?;
+    .map_internal("revoke user refresh tokens")?;
+
+    sqlx::query(
+        r#"
+        UPDATE access_token_records
+        SET revoked_at = now()
+        WHERE actor_type = 'user' AND actor_id = $1
+          AND ($2::uuid IS NULL OR org_id = $2)
+          AND revoked_at IS NULL
+        "#,
+    )
+    .bind(user_id)
+    .bind(org_id)
+    .execute(&state.pool)
+    .await
+    .map_internal("revoke user access tokens")?;
     Ok(())
 }
 
-/// Rotate a refresh token: mark old revoked, insert new in the same family.
+pub enum RotateRefreshOutcome {
+    Rotated(String),
+    ReuseDetected,
+    Revoked,
+}
+
+/// Rotate a refresh token under a row lock. A concurrent second use revokes
+/// the whole family instead of minting a second successor.
 pub async fn rotate_refresh_token(
     state: &AppState,
     old: &RefreshTokenRow,
-) -> ApiResult<String> {
+) -> ApiResult<RotateRefreshOutcome> {
     let token = random_token();
     let expires_at = chrono::Utc::now() + chrono::Duration::from_std(state.config.refresh_token_ttl).unwrap_or_default();
     let new_id = new_id();
 
     let mut tx = state.pool.begin().await.map_internal("begin rotation tx")?;
-    sqlx::query("UPDATE refresh_tokens SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL")
+    let revoked_at = sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
+        "SELECT revoked_at FROM refresh_tokens WHERE id = $1 FOR UPDATE",
+    )
+        .bind(old.id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_internal("rotate: lock old")?
+        .ok_or(ApiError::Unauthorized)?;
+
+    if revoked_at.is_some() {
+        let was_rotated = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM refresh_tokens WHERE rotated_from_id = $1)",
+        )
+        .bind(old.id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_internal("rotate: check successor")?;
+        if was_rotated {
+            sqlx::query(
+                r#"
+                UPDATE refresh_tokens
+                SET revoked_at = COALESCE(revoked_at, now()), reuse_detected_at = now()
+                WHERE family_id = $1
+                "#,
+            )
+            .bind(old.family_id)
+            .execute(&mut *tx)
+            .await
+            .map_internal("rotate: revoke reused family")?;
+            tx.commit().await.map_internal("commit reuse detection")?;
+            return Ok(RotateRefreshOutcome::ReuseDetected);
+        }
+        tx.commit().await.map_internal("commit revoked rotation")?;
+        return Ok(RotateRefreshOutcome::Revoked);
+    }
+
+    sqlx::query("UPDATE refresh_tokens SET revoked_at = now() WHERE id = $1")
         .bind(old.id)
         .execute(&mut *tx)
         .await
@@ -381,5 +549,5 @@ pub async fn rotate_refresh_token(
     .map_internal("rotate: insert new")?;
     tx.commit().await.map_internal("commit rotation")?;
 
-    Ok(token)
+    Ok(RotateRefreshOutcome::Rotated(token))
 }

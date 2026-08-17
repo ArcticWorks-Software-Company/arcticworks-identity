@@ -1,6 +1,6 @@
 //! Correlation-ID middleware and per-request HTTP metadata.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use axum::extract::{ConnectInfo, FromRequestParts, Request};
 use axum::http::request::Parts;
@@ -28,7 +28,7 @@ pub struct HttpMeta {
 
 /// Extract the correlation id, client IP and user agent from the request.
 /// This extractor never fails.
-pub async fn http_meta(parts: &mut Parts) -> HttpMeta {
+pub fn http_meta(parts: &mut Parts, trust_proxy: bool) -> HttpMeta {
     let correlation_id = parts
         .extensions
         .get::<CorrelationId>()
@@ -41,10 +41,21 @@ pub async fn http_meta(parts: &mut Parts) -> HttpMeta {
         .and_then(|v| v.to_str().ok())
         .map(ToOwned::to_owned);
 
-    let ip = parts
+    let peer_ip = parts
         .extensions
         .get::<ConnectInfo<SocketAddr>>()
         .map(|c| c.0.ip());
+    let ip = if trust_proxy {
+        parts
+            .headers
+            .get("x-forwarded-for")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.rsplit(',').next())
+            .and_then(|value| value.trim().parse::<IpAddr>().ok())
+            .or(peer_ip)
+    } else {
+        peer_ip
+    };
 
     HttpMeta {
         correlation_id,
@@ -58,9 +69,9 @@ impl FromRequestParts<crate::state::AppState> for HttpMeta {
 
     async fn from_request_parts(
         parts: &mut Parts,
-        _state: &crate::state::AppState,
+        state: &crate::state::AppState,
     ) -> Result<Self, Self::Rejection> {
-        Ok(http_meta(parts).await)
+        Ok(http_meta(parts, state.config.trust_proxy))
     }
 }
 
@@ -85,4 +96,35 @@ pub async fn correlation_middleware(
         response.headers_mut().insert(CORRELATION_HEADER, v);
     }
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::Request;
+
+    fn request_parts(forwarded_for: Option<&str>) -> Parts {
+        let mut request = Request::builder();
+        if let Some(value) = forwarded_for {
+            request = request.header("x-forwarded-for", value);
+        }
+        let (mut parts, _) = request.body(()).unwrap().into_parts();
+        parts.extensions.insert(ConnectInfo(SocketAddr::from(([10, 0, 0, 2], 1234))));
+        parts
+    }
+
+    #[test]
+    fn forwarded_ip_is_used_only_for_trusted_proxy() {
+        let mut parts = request_parts(Some("198.51.100.7, 203.0.113.9"));
+        assert_eq!(http_meta(&mut parts, true).ip, Some("203.0.113.9".parse().unwrap()));
+
+        let mut parts = request_parts(Some("198.51.100.7"));
+        assert_eq!(http_meta(&mut parts, false).ip, Some("10.0.0.2".parse().unwrap()));
+    }
+
+    #[test]
+    fn malformed_forwarded_ip_falls_back_to_peer() {
+        let mut parts = request_parts(Some("not-an-ip"));
+        assert_eq!(http_meta(&mut parts, true).ip, Some("10.0.0.2".parse().unwrap()));
+    }
 }

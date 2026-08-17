@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use aes_gcm::Aes256Gcm;
 use sqlx::PgPool;
 
 use crate::config::Config;
@@ -14,6 +15,8 @@ pub struct AppState {
     pub pool: PgPool,
     pub rl: Arc<RateLimiter>,
     pub mailer: Arc<Mailer>,
+    /// Key encrypting TOTP secrets at rest.
+    pub totp_key: Arc<Aes256Gcm>,
 }
 
 impl AppState {
@@ -24,12 +27,14 @@ impl AppState {
 
         let rl = RateLimiter::connect(&config).await;
         let mailer = Arc::new(Mailer::new(config.smtp.clone()));
+        let totp_key = Arc::new(crate::totp::cipher_from_config(&config));
 
         Ok(AppState {
             config: Arc::new(config),
             pool,
             rl: Arc::new(rl),
             mailer,
+            totp_key,
         })
     }
 }

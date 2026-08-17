@@ -36,6 +36,10 @@ fn register_limit(state: &AppState) -> u32 {
 const RL_RESET_IP: (u32, u64) = (3, 900); // 3 per 15 min per IP
 const RL_RECOVERY_IP: (u32, u64) = (5, 60); // 5 per minute per IP
 const RL_RESEND_IP: (u32, u64) = (3, 3600); // 3 per hour per IP
+const RL_REAUTH_ACCOUNT: (u32, u64) = (10, 900); // 10 per 15 min per account
+const RL_CHANGE_PASSWORD_ACCOUNT: (u32, u64) = (5, 900); // 5 per 15 min per account
+const RL_MFA_IP: (u32, u64) = (10, 60); // 10 per minute per IP
+const RL_MFA_ACCOUNT: (u32, u64) = (5, 900); // 5 per 15 min per account
 
 // ------------------------------------------------------------- password hashing
 
@@ -54,6 +58,18 @@ pub fn verify_password(password: &str, stored_hash: &str) -> bool {
     Argon2::default()
         .verify_password(password.as_bytes(), &parsed)
         .is_ok()
+}
+
+/// Burn the same CPU time as a real verification on paths where the account
+/// does not exist or has no password, so login timing cannot reveal account
+/// state.
+pub fn verify_password_dummy(password: &str) {
+    static DUMMY_HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let hash = DUMMY_HASH.get_or_init(|| {
+        hash_password("dummy-password-for-timing-equalization")
+            .unwrap_or_default()
+    });
+    let _ = verify_password(password, hash);
 }
 
 // ------------------------------------------------------------------- models
@@ -149,6 +165,13 @@ pub struct ChangePasswordReq {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MfaLoginReq {
+    pub token: String,
+    pub code: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateProfileReq {
     pub display_name: String,
 }
@@ -166,6 +189,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/auth/recovery", post(recovery_login))
         .route("/api/auth/resend-verification", post(resend_verification))
         .route("/api/auth/reauth", post(reauth))
+        .route("/api/auth/mfa", post(mfa_login))
         .route("/api/auth/me", get(me))
         .route("/api/account/sessions", get(list_sessions))
         .route("/api/account/sessions/{id}/revoke", post(revoke_session))
@@ -358,7 +382,9 @@ pub async fn login(
     .map_internal("lookup user for login")?;
 
     let Some(user) = user else {
-        // Constant-time-ish generic failure; never reveals account existence.
+        // Constant-time failure: burn a real Argon2 verification so response
+        // timing never reveals whether the account exists.
+        verify_password_dummy(&req.password);
         return Err(ApiError::Validation("invalid email or password".into()));
     };
     let Some(password_hash) = sqlx::query_scalar::<_, Option<String>>("SELECT password_hash FROM users WHERE id = $1")
@@ -367,6 +393,7 @@ pub async fn login(
         .await
         .map_internal("load password hash")?
     else {
+        verify_password_dummy(&req.password);
         return Err(ApiError::Validation("invalid email or password".into()));
     };
 
@@ -390,6 +417,31 @@ pub async fn login(
 
     if user.email_verified_at.is_none() {
         return Err(ApiError::EmailNotVerified);
+    }
+
+    // Second factor: password-correct users with TOTP enabled receive a
+    // short-lived challenge instead of a session cookie.
+    if crate::totp::is_enabled(&state.pool, user.id).await? {
+        let mfa_token = crate::totp::create_login_challenge(&state, user.id).await?;
+        audit::record(
+            &state.pool,
+            &meta,
+            AuditEvent {
+                event_type: "auth.mfa_required",
+                actor_type: ActorType::User,
+                actor_id: Some(user.id),
+                org_id: None,
+                target_type: None,
+                target_id: None,
+                metadata: serde_json::json!({}),
+            },
+        )
+        .await;
+        return Ok(Json(serde_json::json!({
+            "mfaRequired": true,
+            "mfaToken": mfa_token,
+        }))
+        .into_response());
     }
 
     let (session, token) = authn::create_session(
@@ -516,20 +568,28 @@ async fn reset_password(
         return Err(ApiError::Validation("password must be between 8 and 128 characters".into()));
     }
 
-    let row = sqlx::query_as::<_, (Uuid, Option<chrono::DateTime<chrono::Utc>>)>(
-        "SELECT user_id, used_at FROM password_resets WHERE token_hash = $1",
+    let row = sqlx::query_as::<_, (
+        Uuid,
+        chrono::DateTime<chrono::Utc>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    )>(
+        "SELECT user_id, expires_at, used_at FROM password_resets WHERE token_hash = $1",
     )
     .bind(hash_token(&req.token))
     .fetch_optional(&state.pool)
     .await
     .map_internal("lookup reset token")?;
 
-    let Some((user_id, used_at)) = row else {
+    let Some((user_id, expires_at, used_at)) = row else {
         return Err(ApiError::TokenInvalid);
     };
-    if used_at.is_some() {
+    if used_at.is_some() || expires_at <= chrono::Utc::now() {
         return Err(ApiError::TokenInvalid);
     }
+
+    // A valid reset token represents a compromised-password event. Revoke
+    // OAuth access before changing the credential.
+    crate::oidc::token::revoke_user_tokens(&state, user_id, None).await?;
 
     let consumed = sqlx::query(
         "UPDATE password_resets SET used_at = now() WHERE token_hash = $1 AND expires_at > now() AND used_at IS NULL",
@@ -571,6 +631,90 @@ async fn reset_password(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// Complete password login with the TOTP second factor. Consumes the
+/// single-use challenge and issues the browser session.
+async fn mfa_login(
+    State(state): State<AppState>,
+    meta: HttpMeta,
+    Json(req): Json<MfaLoginReq>,
+) -> ApiResult<Response> {
+    let ip_key = meta.ip.map_or_else(|| "unknown".into(), |ip| ip.to_string());
+    if let Err(retry) = state.rl.check("mfa-ip", &ip_key, RL_MFA_IP.0, RL_MFA_IP.1).await {
+        return Err(ApiError::RateLimited { retry_after_secs: retry });
+    }
+
+    // Resolve the challenge before verifying so the account can be
+    // rate-limited; the challenge survives failed code attempts.
+    let user_id = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT user_id FROM mfa_challenges
+        WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now()
+        "#,
+    )
+    .bind(hash_token(&req.token))
+    .fetch_optional(&state.pool)
+    .await
+    .map_internal("lookup mfa challenge")?
+    .ok_or(ApiError::Unauthorized)?;
+
+    let account_key = user_id.to_string();
+    if let Err(retry) = state
+        .rl
+        .check("mfa-account", &account_key, RL_MFA_ACCOUNT.0, RL_MFA_ACCOUNT.1)
+        .await
+    {
+        return Err(ApiError::RateLimited { retry_after_secs: retry });
+    }
+
+    if !crate::totp::verify_user_code(&state, user_id, &req.code).await? {
+        return Err(ApiError::Validation("invalid authentication code".into()));
+    }
+
+    // Consume the challenge atomically; a second use with the same token
+    // fails here.
+    let consumed = crate::totp::consume_login_challenge(&state, &req.token).await?;
+    if consumed.is_none() {
+        return Err(ApiError::Unauthorized);
+    }
+
+    let user = sqlx::query_as::<_, authn::UserRow>(
+        "SELECT id, email, display_name, email_verified_at FROM users WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_one(&state.pool)
+    .await
+    .map_internal("load user for mfa login")?;
+
+    let (session, token) = authn::create_session(
+        &state.pool,
+        &state.config,
+        user.id,
+        meta.ip.map(|ip| ip.to_string()),
+        meta.user_agent.clone(),
+    )
+    .await?;
+
+    audit::record(
+        &state.pool,
+        &meta,
+        AuditEvent {
+            event_type: "auth.login_mfa",
+            actor_type: ActorType::User,
+            actor_id: Some(user.id),
+            org_id: None,
+            target_type: Some("session"),
+            target_id: Some(session.id),
+            metadata: serde_json::json!({}),
+        },
+    )
+    .await;
+
+    let mut resp = Json(serde_json::json!({ "user": UserJson::from(&user) })).into_response();
+    resp.headers_mut()
+        .insert(header::SET_COOKIE, authn::session_cookie_value(&state.config, &token));
+    Ok(resp)
+}
+
 async fn resend_verification(
     State(state): State<AppState>,
     meta: HttpMeta,
@@ -605,6 +749,14 @@ async fn reauth(
     authed: Authed,
     Json(req): Json<ReauthReq>,
 ) -> ApiResult<Response> {
+    let account_key = authed.0.user.id.to_string();
+    if let Err(retry) = state
+        .rl
+        .check("reauth-account", &account_key, RL_REAUTH_ACCOUNT.0, RL_REAUTH_ACCOUNT.1)
+        .await
+    {
+        return Err(ApiError::RateLimited { retry_after_secs: retry });
+    }
     let password_hash = sqlx::query_scalar::<_, Option<String>>("SELECT password_hash FROM users WHERE id = $1")
         .bind(authed.0.user.id)
         .fetch_one(&state.pool)
@@ -774,6 +926,19 @@ async fn change_password(
     Json(req): Json<ChangePasswordReq>,
 ) -> ApiResult<Response> {
     authed.0.require_reauth(&state.config)?;
+    let account_key = authed.0.user.id.to_string();
+    if let Err(retry) = state
+        .rl
+        .check(
+            "change-password-account",
+            &account_key,
+            RL_CHANGE_PASSWORD_ACCOUNT.0,
+            RL_CHANGE_PASSWORD_ACCOUNT.1,
+        )
+        .await
+    {
+        return Err(ApiError::RateLimited { retry_after_secs: retry });
+    }
     if !util::is_valid_password(&req.new_password) {
         return Err(ApiError::Validation("password must be between 8 and 128 characters".into()));
     }
@@ -788,6 +953,8 @@ async fn change_password(
     if !verify_password(&req.current_password, &current) {
         return Err(ApiError::Validation("invalid current password".into()));
     }
+
+    crate::oidc::token::revoke_user_tokens(&state, authed.0.user.id, None).await?;
 
     let new_hash = hash_password(&req.new_password)?;
     sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
