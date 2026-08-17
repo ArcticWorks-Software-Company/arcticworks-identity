@@ -8,6 +8,7 @@ export interface DiscoveryDocument {
   jwks_uri: string;
   revocation_endpoint: string;
   end_session_endpoint?: string;
+  device_authorization_endpoint?: string;
   response_types_supported: string[];
   grant_types_supported: string[];
   subject_types_supported: string[];
@@ -51,6 +52,16 @@ export interface UserInfoClaims {
   email?: string;
   email_verified?: boolean;
   org?: string;
+}
+
+/** RFC 8628 device authorization response. */
+export interface DeviceAuthorizationResponse {
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  verification_uri_complete: string;
+  expires_in: number;
+  interval: number;
 }
 
 export interface PermissionCheckRequest {

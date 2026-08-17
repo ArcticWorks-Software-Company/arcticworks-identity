@@ -2,7 +2,12 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import { errorFromResponse, IdentityError } from "./errors.js";
-import type { DiscoveryDocument, TokenSet, UserInfoClaims } from "./types.js";
+import type {
+  DeviceAuthorizationResponse,
+  DiscoveryDocument,
+  TokenSet,
+  UserInfoClaims,
+} from "./types.js";
 
 export interface OidcClientConfig {
   /** Identity issuer, e.g. `https://identity.arcticworks.dev` or `http://localhost:8080`. */
@@ -175,6 +180,63 @@ export class OidcClient {
     }
     if (options?.state) params.set("state", options.state);
     return `${endpoint}?${params.toString()}`;
+  }
+
+  /** RFC 8628: start a device authorization. Show the returned
+   * `verification_uri_complete` (or `verification_uri` + `user_code`) to the
+   * user, then poll with {@link pollDeviceCode}. */
+  async deviceAuthorization(scopes?: string[]): Promise<DeviceAuthorizationResponse> {
+    const doc = await this.discovery();
+    const endpoint = doc.device_authorization_endpoint;
+    if (!endpoint) {
+      throw new IdentityError("internal", "Device flow is not supported by this issuer");
+    }
+    const body = new URLSearchParams({
+      client_id: this.config.clientId,
+      scope: (scopes ?? this.config.scopes!).join(" "),
+    });
+    if (this.config.clientSecret) body.set("client_secret", this.config.clientSecret);
+    const resp = await this.fetchImpl(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body,
+    });
+    if (!resp.ok) throw errorFromResponse(resp.status, await resp.json().catch(() => ({})));
+    return (await resp.json()) as DeviceAuthorizationResponse;
+  }
+
+  /** RFC 8628: exchange a device code once. Throws while the user has not
+   * completed the flow (`authorization_pending` / `slow_down`). */
+  async exchangeDeviceCode(deviceCode: string): Promise<TokenSet> {
+    const doc = await this.discovery();
+    const body = new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+      device_code: deviceCode,
+      client_id: this.config.clientId,
+    });
+    return this.tokenRequest(doc.token_endpoint, body);
+  }
+
+  /** Poll the token endpoint until the user completes (or denies/expires)
+   * the device authorization. */
+  async pollDeviceCode(deviceCode: string, options?: { intervalMs?: number; timeoutMs?: number }): Promise<TokenSet> {
+    const intervalMs = options?.intervalMs ?? 5000;
+    const timeoutMs = options?.timeoutMs ?? 15 * 60 * 1000;
+    const started = Date.now();
+    for (;;) {
+      try {
+        return await this.exchangeDeviceCode(deviceCode);
+      } catch (e) {
+        const pending =
+          e instanceof IdentityError &&
+          (e.message.startsWith("authorization_pending") || e.message.startsWith("slow_down"));
+        if (!pending) throw e;
+        if (Date.now() - started > timeoutMs) {
+          throw new IdentityError("network", "Device authorization timed out");
+        }
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      }
+    }
   }
 
   /** The end-session/return URL is the authorize flow's `prompt=login`; for

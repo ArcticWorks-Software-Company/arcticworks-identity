@@ -1,8 +1,9 @@
 <script lang="ts">
   import { Badge, Button, Card } from "@arcticworks/svelte";
   import { api } from "$lib/api/client";
-  import { refreshSession, sessionState } from "$lib/session.svelte.ts";
-  import { FormField, PageHeader } from "$lib/ui";
+  import { refreshSession, sessionState, signOut } from "$lib/session.svelte.ts";
+  import { withReauth } from "$lib/reauth.svelte.ts";
+  import { ConfirmDialog, FormField, PageHeader } from "$lib/ui";
   import type { UserJson } from "$lib/api/types";
 
   const session = sessionState();
@@ -35,6 +36,27 @@
       busy = false;
     }
   }
+
+  // Account deletion
+  let showDelete = $state(false);
+  let deleteError = $state("");
+  let deleteBusy = $state(false);
+
+  async function deleteAccount() {
+    deleteError = "";
+    deleteBusy = true;
+    try {
+      await withReauth(async () => {
+        await api.del("/api/account");
+      });
+      signOut();
+      window.location.href = "/";
+    } catch (e) {
+      deleteError = e instanceof Error ? e.message : "Could not delete your account";
+    } finally {
+      deleteBusy = false;
+    }
+  }
 </script>
 
 <div class="aw-page--narrow">
@@ -65,7 +87,24 @@
         </div>
       </form>
     </Card>
+
+    <h2 class="aw-section-title">Danger zone</h2>
+    <Card>
+      <p class="aw-muted aw-body-copy aw-flush">
+        Deleting your account removes your profile, sessions, memberships, passkeys and access grants. Organizations you own must be transferred or deleted first.
+      </p>
+      {#if deleteError}<p class="aw-field-error" role="alert">{deleteError}</p>{/if}
+      <Button variant="danger" loading={deleteBusy} disabled={deleteBusy} onclick={() => (showDelete = true)}>Delete account</Button>
+      <ConfirmDialog
+        bind:open={showDelete}
+        title="Delete your account?"
+        description="This permanently deletes your ArcticWorks account and cannot be undone."
+        confirmLabel="Delete account"
+        onConfirm={deleteAccount}
+      />
+    </Card>
   {:else}
     <p class="aw-muted" role="status">Loading profile…</p>
   {/if}
 </div>
+
