@@ -52,6 +52,7 @@ pub async fn test_state(pool: PgPool) -> AppState {
         rl: Arc::new(RateLimiter::connect(&test_config()).await),
         mailer: Arc::new(Mailer::new(test_config().smtp)),
         totp_key: Arc::new(identity_api::totp::cipher_from_config(&test_config())),
+        webhook_client: Arc::new(reqwest::Client::new()),
     }
 }
 

@@ -2,10 +2,10 @@
 //! Rows are never updated or deleted; event types are stable strings.
 
 use serde_json::Value;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::correlation::HttpMeta;
+use crate::state::AppState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActorType {
@@ -39,8 +39,10 @@ pub struct AuditEvent<'a> {
 /// Record an audit event. Failures are logged loudly but never fail the
 /// caller's operation (audit must not break the primary flow); security
 /// events that accompany a successful operation are recorded in the same
-/// transaction by callers where durability matters.
-pub async fn record(pool: &PgPool, meta: &HttpMeta, event: AuditEvent<'_>) {
+/// transaction by callers where durability matters. Org-scoped events are
+/// scheduled for asynchronous webhook delivery.
+pub async fn record(state: &AppState, meta: &HttpMeta, event: AuditEvent<'_>) {
+    let id = Uuid::now_v7();
     let res = sqlx::query(
         r#"
         INSERT INTO audit_events
@@ -49,7 +51,7 @@ pub async fn record(pool: &PgPool, meta: &HttpMeta, event: AuditEvent<'_>) {
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::inet, $10, $11)
         "#,
     )
-    .bind(Uuid::now_v7())
+    .bind(id)
     .bind(meta.correlation_id)
     .bind(event.event_type)
     .bind(event.actor_type.as_str())
@@ -60,7 +62,7 @@ pub async fn record(pool: &PgPool, meta: &HttpMeta, event: AuditEvent<'_>) {
     .bind(meta.ip.map(|ip| ip.to_string()))
     .bind(&meta.user_agent)
     .bind(&event.metadata)
-    .execute(pool)
+    .execute(&state.pool)
     .await;
 
     if let Err(e) = res {
@@ -69,5 +71,7 @@ pub async fn record(pool: &PgPool, meta: &HttpMeta, event: AuditEvent<'_>) {
             error = %e,
             "failed to record audit event"
         );
+    } else if let Some(org_id) = event.org_id {
+        crate::webhooks::schedule(state, id, org_id);
     }
 }

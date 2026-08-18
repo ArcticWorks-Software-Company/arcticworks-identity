@@ -24,6 +24,7 @@ pub mod state;
 pub mod tokens;
 pub mod totp;
 pub mod util;
+pub mod webhooks;
 
 use axum::http::header;
 use axum::http::Method;
@@ -59,6 +60,7 @@ pub fn app(state: state::AppState) -> Router {
         .merge(passkeys::routes())
         .merge(rbac::routes())
         .merge(totp::routes())
+        .merge(webhooks::routes())
         .merge(if state.config.docs_enabled {
             openapi::routes()
         } else {

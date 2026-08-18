@@ -28,6 +28,7 @@
     { id: `/orgs/${slug}/applications`, label: "Applications", icon: "grid" },
     { id: `/orgs/${slug}/service-accounts`, label: "Service accounts", icon: "terminal" },
     { id: `/orgs/${slug}/devices`, label: "Devices", icon: "cpu" },
+    { id: `/orgs/${slug}/webhooks`, label: "Webhooks", icon: "terminal" },
     { id: `/orgs/${slug}/audit`, label: "Audit log", icon: "file" },
     { id: `/orgs/${slug}/settings`, label: "Settings", icon: "gear" },
   ]);

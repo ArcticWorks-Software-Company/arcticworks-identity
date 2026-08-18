@@ -232,7 +232,7 @@ async fn register_finish(
     }
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "passkey.registered",
@@ -357,7 +357,7 @@ async fn auth_finish(
     .await?;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "auth.passkey_login",
@@ -424,7 +424,7 @@ async fn delete_passkey(
     }
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "passkey.deleted",

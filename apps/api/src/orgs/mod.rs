@@ -325,7 +325,7 @@ pub async fn create_org(
     tx.commit().await.map_internal("commit org tx")?;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "org.created",
@@ -429,7 +429,7 @@ pub async fn update_org(
     }
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "org.updated",
@@ -468,7 +468,7 @@ async fn switch_org(
         .map_internal("switch org")?;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "org.switched",
@@ -558,7 +558,7 @@ pub async fn transfer_ownership(
     tx.commit().await.map_internal("commit transfer")?;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "org.ownership_transferred",
@@ -713,7 +713,7 @@ pub async fn set_member_role(
     }
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "member.role_changed",
@@ -807,7 +807,7 @@ async fn update_member_status(
     }
 
     audit::record(
-        &state.pool,
+        &state,
         meta,
         AuditEvent {
             event_type: if status == "suspended" { "member.suspended" } else { "member.unsuspended" },
@@ -878,7 +878,7 @@ pub async fn remove_member(
     crate::oidc::token::revoke_user_tokens(&state, user_id, Some(org_id)).await?;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "member.removed",
@@ -980,7 +980,7 @@ pub async fn create_invitation(
         .await;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "invite.created",
@@ -1111,7 +1111,7 @@ pub async fn revoke_invitation(
     }
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "invite.revoked",
@@ -1239,7 +1239,7 @@ pub async fn accept_invitation(
     tx.commit().await.map_internal("commit accept")?;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "invite.accepted",
@@ -1342,7 +1342,7 @@ pub async fn create_team(
     }
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "team.created",
@@ -1404,7 +1404,7 @@ pub async fn update_team(
     }
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "team.updated",
@@ -1454,7 +1454,7 @@ pub async fn delete_team(
     }
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "team.deleted",
@@ -1543,7 +1543,7 @@ async fn add_team_member(
     }
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "team.member_added",
@@ -1579,7 +1579,7 @@ async fn remove_team_member(
     }
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "team.member_removed",

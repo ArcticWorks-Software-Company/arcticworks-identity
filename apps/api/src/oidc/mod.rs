@@ -398,7 +398,7 @@ async fn consent(
 
     if req.decision == "deny" {
         audit::record(
-            &state.pool,
+            &state,
             &meta,
             AuditEvent {
                 event_type: "oauth.consent_denied",
@@ -426,7 +426,7 @@ async fn consent(
     let code = issue_auth_code(&state, &client, authed.0.user.id, org_id, &scopes, &areq).await?;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "oauth.consent_granted",
@@ -599,7 +599,7 @@ async fn token_auth_code(
     let computed = token::sha256_b64url(verifier);
     if !tokens_equal(&computed, &code_row.pkce_challenge) {
         audit::record(
-            &state.pool,
+            &state,
             meta,
             AuditEvent {
                 event_type: "oauth.pkce_failed",
@@ -664,7 +664,7 @@ async fn token_auth_code(
     let minted = token::mint_tokens(state, &treq, with_refresh).await?;
 
     audit::record(
-        &state.pool,
+        &state,
         meta,
         AuditEvent {
             event_type: "oauth.token_issued",
@@ -714,7 +714,7 @@ async fn token_refresh(
         token::RotateRefreshOutcome::Rotated(new) => (Some(new), row.org_id),
         token::RotateRefreshOutcome::ReuseDetected => {
             audit::record(
-                &state.pool,
+                &state,
                 meta,
                 AuditEvent {
                     event_type: "oauth.refresh_token_reuse",
@@ -776,7 +776,7 @@ async fn token_refresh(
     let minted = token::mint_tokens(state, &treq, false).await?;
 
     audit::record(
-        &state.pool,
+        &state,
         meta,
         AuditEvent {
             event_type: "oauth.token_refreshed",
@@ -820,7 +820,7 @@ async fn token_client_credentials(
     let minted = token::mint_tokens(state, &treq, false).await?;
 
     audit::record(
-        &state.pool,
+        &state,
         meta,
         AuditEvent {
             event_type: match actor.actor_type() {
@@ -904,7 +904,7 @@ async fn revoke(
                 .await
                 .map_internal("revoke refresh token")?;
             audit::record(
-                &state.pool,
+                &state,
                 &meta,
                 AuditEvent {
                     event_type: "oauth.token_revoked",
@@ -935,7 +935,7 @@ async fn revoke(
             .map_internal("revoke access token")?;
         if res.rows_affected() > 0 {
             audit::record(
-                &state.pool,
+                &state,
                 &meta,
                 AuditEvent {
                     event_type: "oauth.token_revoked",
@@ -1027,7 +1027,7 @@ async fn end_session_inner(
         if should_logout {
             authn::revoke_session(&state.pool, session_id).await?;
             audit::record(
-                &state.pool,
+                &state,
                 meta,
                 AuditEvent {
                     event_type: "auth.logout_rp",
@@ -1173,7 +1173,7 @@ pub async fn create_application(
     .map_internal("create application")?;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "app.created",
@@ -1247,34 +1247,55 @@ pub async fn update_application(
         bind_idx += 1;
         changes.push(serde_json::to_string(&uris).unwrap_or_else(|_| "[]".into()));
     }
-    if let Some(enabled) = req.application_enabled {
-        sql.push_str(&format!("application_enabled = ${bind_idx}, "));
-        bind_idx += 1;
-        changes.push(if enabled { "true".into() } else { "false".into() });
-    }
     if let Some(uris) = &req.post_logout_redirect_uris {
         let uris = validate_post_logout_uris(uris)?;
         sql.push_str(&format!("post_logout_redirect_uris = ${bind_idx}, "));
         bind_idx += 1;
         changes.push(serde_json::to_string(&uris).unwrap_or_else(|_| "[]".into()));
     }
-    sql.push_str("updated_at = now() WHERE client_id = $");
-    sql.push_str(&bind_idx.to_string());
-    sql.push_str(" AND org_id = $");
-    sql.push_str(&(bind_idx + 1).to_string());
 
-    let mut q = sqlx::query(&sql);
-    for c in &changes {
-        q = q.bind(c);
+    // application_enabled is a real boolean: bind it typed rather than as a
+    // string literal (text parameters cannot be coerced to boolean).
+    let enabled_change = req.application_enabled;
+
+    if changes.is_empty() && enabled_change.is_none() {
+        return Err(ApiError::Validation("nothing to update".into()));
     }
-    q = q.bind(&client_id).bind(org_id);
-    let res = q.execute(&state.pool).await.map_internal("update application")?;
-    if res.rows_affected() == 0 {
-        return Err(ApiError::NotFound);
+
+    let mut res = None;
+    if !changes.is_empty() {
+        sql.push_str("updated_at = now() WHERE client_id = $");
+        sql.push_str(&bind_idx.to_string());
+        sql.push_str(" AND org_id = $");
+        sql.push_str(&(bind_idx + 1).to_string());
+
+        let mut q = sqlx::query(&sql);
+        for c in &changes {
+            q = q.bind(c);
+        }
+        q = q.bind(&client_id).bind(org_id);
+        res = Some(q.execute(&state.pool).await.map_internal("update application")?);
+    }
+    if let Some(enabled) = enabled_change {
+        let r = sqlx::query(
+            "UPDATE oidc_clients SET application_enabled = $1, updated_at = now() WHERE client_id = $2 AND org_id = $3",
+        )
+        .bind(enabled)
+        .bind(&client_id)
+        .bind(org_id)
+        .execute(&state.pool)
+        .await
+        .map_internal("update application")?;
+        res = Some(r);
+    }
+    if let Some(r) = res {
+        if r.rows_affected() == 0 {
+            return Err(ApiError::NotFound);
+        }
     }
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "app.updated",
@@ -1359,7 +1380,7 @@ pub async fn rotate_client_secret(
     tx.commit().await.map_internal("commit secret rotation")?;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "app.secret_rotated",
@@ -1415,7 +1436,7 @@ pub async fn delete_application(
     }
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "app.deleted",
@@ -1517,7 +1538,7 @@ async fn revoke_account_grant(
     tx.commit().await.map_internal("commit grant revoke")?;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "app.grant_revoked",

@@ -251,7 +251,7 @@ pub async fn create_service_account(
     tx.commit().await.map_internal("commit SA tx")?;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "sa.created",
@@ -374,7 +374,7 @@ async fn update_service_account(
     }
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "sa.updated",
@@ -457,7 +457,7 @@ pub async fn rotate_service_account_credential(
     tx.commit().await.map_internal("commit rotate")?;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "sa.credential_rotated",
@@ -551,7 +551,7 @@ async fn set_sa_status(
     }
 
     audit::record(
-        &state.pool,
+        &state,
         meta,
         AuditEvent {
             event_type: if status == "suspended" { "sa.suspended" } else { "sa.unsuspended" },
@@ -603,7 +603,7 @@ pub async fn delete_service_account(
     }
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "sa.deleted",
@@ -675,7 +675,7 @@ pub async fn create_enrollment_token(
     .map_internal("create enrollment token")?;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "device.enrollment_token_created",
@@ -775,7 +775,7 @@ pub async fn enroll_device(
     .map_internal("enroll device")?;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "device.enrolled",
@@ -916,7 +916,7 @@ pub async fn update_device(
     }
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "device.updated",
@@ -985,7 +985,7 @@ pub async fn rotate_device_credential(
     .map_internal("rotate device credential")?;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "device.credential_rotated",
@@ -1044,7 +1044,7 @@ pub async fn revoke_device(
     }
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "device.revoked",

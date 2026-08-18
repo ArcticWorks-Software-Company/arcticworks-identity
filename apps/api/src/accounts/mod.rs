@@ -257,7 +257,7 @@ pub async fn register(
 
     issue_verification(&state, &meta, user_id, &email).await;
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "account.register",
@@ -332,7 +332,7 @@ async fn verify_email(
         .map_internal("mark email verified")?;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "account.email_verified",
@@ -400,7 +400,7 @@ pub async fn login(
 
     if !verify_password(&req.password, &password_hash) {
         audit::record(
-            &state.pool,
+            &state,
             &meta,
             AuditEvent {
                 event_type: "auth.login_failed",
@@ -425,7 +425,7 @@ pub async fn login(
     if crate::totp::is_enabled(&state.pool, user.id).await? {
         let mfa_token = crate::totp::create_login_challenge(&state, user.id).await?;
         audit::record(
-            &state.pool,
+            &state,
             &meta,
             AuditEvent {
                 event_type: "auth.mfa_required",
@@ -455,7 +455,7 @@ pub async fn login(
     .await?;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "auth.login",
@@ -482,7 +482,7 @@ async fn logout(
 ) -> ApiResult<Response> {
     authn::revoke_session(&state.pool, authed.0.session.id).await?;
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "auth.logout",
@@ -542,7 +542,7 @@ async fn forgot_password(
             .await;
 
         audit::record(
-            &state.pool,
+            &state,
             &meta,
             AuditEvent {
                 event_type: "auth.reset_requested",
@@ -615,7 +615,7 @@ async fn reset_password(
     authn::revoke_all_user_sessions(&state.pool, user_id, None).await?;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "account.password_reset",
@@ -667,7 +667,7 @@ async fn delete_account(
     }
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "account.deleted",
@@ -748,7 +748,7 @@ async fn mfa_login(
     .await?;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "auth.login_mfa",
@@ -823,7 +823,7 @@ async fn reauth(
 
     authn::mark_reauth(&state.pool, authed.0.session.id).await?;
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "auth.reauth",
@@ -929,7 +929,7 @@ async fn revoke_session(
     }
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "session.revoke",
@@ -955,7 +955,7 @@ async fn revoke_others(
     authn::revoke_all_user_sessions(&state.pool, authed.0.user.id, Some(authed.0.session.id)).await?;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "session.revoke_others",
@@ -1021,7 +1021,7 @@ async fn change_password(
     authn::revoke_all_user_sessions(&state.pool, authed.0.user.id, Some(authed.0.session.id)).await?;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "account.password_changed",
@@ -1064,7 +1064,7 @@ async fn update_profile(
     .map_internal("reload user")?;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "account.profile_updated",
@@ -1119,7 +1119,7 @@ async fn generate_recovery_codes(
     }
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "recovery_codes.generated",
@@ -1208,7 +1208,7 @@ async fn recovery_login(
     .await?;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "auth.recovery_used",

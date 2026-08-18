@@ -46,6 +46,7 @@ pub mod perms {
     pub const AUDIT_READ: &str = "org.audit.read";
     pub const SETTINGS_READ: &str = "org.settings.read";
     pub const SETTINGS_MANAGE: &str = "org.settings.manage";
+    pub const WEBHOOKS_MANAGE: &str = "org.webhooks.manage";
 }
 
 /// Default permission set for the built-in Administrator role.
@@ -69,6 +70,7 @@ pub const ADMIN_PERMS: &[&str] = &[
     perms::AUDIT_READ,
     perms::SETTINGS_READ,
     perms::SETTINGS_MANAGE,
+    perms::WEBHOOKS_MANAGE,
 ];
 
 /// Default permission set for the built-in Member role.
@@ -456,7 +458,7 @@ pub async fn create_role(
     tx.commit().await.map_internal("commit role tx")?;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "role.created",
@@ -562,7 +564,7 @@ pub async fn update_role(
     tx.commit().await.map_internal("commit role update")?;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "role.updated",
@@ -646,7 +648,7 @@ pub async fn delete_role(
         .map_internal("delete role")?;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "role.deleted",

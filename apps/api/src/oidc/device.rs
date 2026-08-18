@@ -109,7 +109,7 @@ async fn device_authorization(
     .map_internal("store device authorization")?;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "device.authorization_started",
@@ -236,7 +236,7 @@ async fn device_approve(
     }
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: if req.decision == "approve" {
@@ -373,7 +373,7 @@ pub async fn token_device_code(
             let minted = token::mint_tokens(state, &treq, with_refresh).await?;
 
             audit::record(
-                &state.pool,
+                &state,
                 meta,
                 AuditEvent {
                     event_type: "device.token_issued",

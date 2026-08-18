@@ -15,8 +15,10 @@ pub struct AppState {
     pub pool: PgPool,
     pub rl: Arc<RateLimiter>,
     pub mailer: Arc<Mailer>,
-    /// Key encrypting TOTP secrets at rest.
+    /// Key encrypting TOTP secrets and webhook signing secrets at rest.
     pub totp_key: Arc<Aes256Gcm>,
+    /// HTTP client for outbound webhook delivery.
+    pub webhook_client: Arc<reqwest::Client>,
 }
 
 impl AppState {
@@ -28,6 +30,12 @@ impl AppState {
         let rl = RateLimiter::connect(&config).await;
         let mailer = Arc::new(Mailer::new(config.smtp.clone()));
         let totp_key = Arc::new(crate::totp::cipher_from_config(&config));
+        let webhook_client = Arc::new(
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .map_err(|e| anyhow::anyhow!("webhook client init failed: {e}"))?,
+        );
 
         Ok(AppState {
             config: Arc::new(config),
@@ -35,6 +43,7 @@ impl AppState {
             rl: Arc::new(rl),
             mailer,
             totp_key,
+            webhook_client,
         })
     }
 }

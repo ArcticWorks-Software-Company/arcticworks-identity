@@ -302,7 +302,7 @@ async fn setup_totp(
     .map_internal("store totp secret")?;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "totp.setup_initiated",
@@ -364,7 +364,7 @@ async fn verify_totp(
     .map_internal("enable totp")?;
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "totp.enabled",
@@ -398,7 +398,7 @@ async fn disable_totp(
     }
 
     audit::record(
-        &state.pool,
+        &state,
         &meta,
         AuditEvent {
             event_type: "totp.disabled",

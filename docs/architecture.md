@@ -113,6 +113,7 @@ All tables are defined in `apps/api/migrations/` (0001–0010). Highlights:
 | `oauth_grants`, `auth_codes` | User consent and single-use authorization codes |
 | `refresh_tokens` | Rotating refresh tokens with family chains |
 | `device_authorizations` | RFC 8628 device grants: pending/approved/denied, polling interval |
+| `webhook_endpoints`, `webhook_deliveries` | Org webhooks: encrypted signing secrets; per-event delivery log |
 | `access_token_records` | jti allowlist for RFC 7009 revocation |
 | `oidc_signing_keys` | Rotatable RSA keys (PKCS#8 v1 DER in DB) |
 | `service_accounts`, `service_account_credentials` | Machine identities with short-lived credentials |
@@ -275,6 +276,15 @@ invitations, ownership), applications (registration, secret rotation,
 grants), machine identities (service accounts, enrollment, devices) and
 OAuth events (token issuance, refresh, **reuse detection**, revocation,
 PKCE failures).
+
+**Webhooks**: organizations may register HTTP endpoints that receive every
+org-scoped audit event asynchronously (one retry per delivery, never
+blocking the audited request). Each delivery is signed with HMAC-SHA256
+over the timestamp and raw body (`x-arcticworks-signature: t=…,v1=…`);
+signing secrets are shown once, AES-256-GCM encrypted at rest, and
+rotatable. URLs must be http(s) without embedded credentials. Delivery
+attempts are logged per endpoint (`webhook_deliveries`) and the lifecycle
+is itself audited (`webhook.created/updated/secret_rotated/deleted`).
 
 ## 8. Security mechanisms (summary)
 

@@ -82,6 +82,7 @@ codes, organization data, audit log, signing keys, email tokens.
 | C1 | Compromised dependency | Low | Various | Minimal dependency surface (pure-Rust crypto where feasible — no OpenSSL); `Cargo.lock` and `package-lock.json` committed; CI runs `cargo check/test/build`, `npm audit` and `cargo audit` on every push |
 | C2 | Compromised administrator account | Medium | Full platform | Reauthentication required for sensitive actions; audit trail; ownership transfer requires reauth; suspended members lose all access |
 | C3 | Misconfigured deployment (plaintext cookies, weak TLS) | Medium | Account takeover | Deployment docs mandate TLS termination, `SECURE_COOKIES=true`, `TRUST_PROXY=true` behind the proxy; the proxy overwrites `X-Forwarded-For` with its own peer address and the API accepts it only when `TRUST_PROXY` is set; nginx sends HSTS and frame/mime/type headers; readiness checks |
+| C4 | Malicious webhook target (SSRF) / secret exposure | Medium | Data exfiltration | Webhook URLs must be http(s) without embedded credentials; signing secrets are AES-256-GCM encrypted at rest, shown once, rotatable; deliveries are signed with HMAC-SHA256 and attempts are logged per endpoint |
 
 ## 8. Assumptions
 
