@@ -3,6 +3,8 @@
 	<p>Centralized identity and access platform for the ArcticWorks ecosystem.</p>
 </div>
 
+[English](README.md) · [简体中文](README.zh-CN.md)
+
 [![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
 [![CI](https://github.com/ArcticWorks-Software-Company/arcticworks-identity/actions/workflows/ci.yml/badge.svg)](https://github.com/ArcticWorks-Software-Company/arcticworks-identity/actions/workflows/ci.yml)
 
