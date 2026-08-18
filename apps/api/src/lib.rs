@@ -14,6 +14,7 @@ pub mod email;
 pub mod error;
 pub mod ids;
 pub mod machine;
+pub mod metrics;
 pub mod openapi;
 pub mod orgs;
 pub mod oidc;
@@ -51,6 +52,8 @@ pub fn app(state: state::AppState) -> Router {
             "x-correlation-id".parse().unwrap(),
         ]);
 
+    let metrics_enabled = state.config.metrics_enabled;
+
     let api = Router::new()
         .merge(accounts::routes())
         .merge(orgs::routes())
@@ -65,13 +68,25 @@ pub fn app(state: state::AppState) -> Router {
             Router::new()
         });
 
-    Router::new()
+    let router = Router::new()
         .route("/healthz", get(healthz))
         .route("/healthz/ready", get(ready))
-        .merge(api)
+        .merge(api);
+
+    let router = if state.config.metrics_enabled {
+        router.route("/metrics", get(metrics::endpoint))
+    } else {
+        router
+    };
+
+    router
         .layer(cors)
         .layer(CatchPanicLayer::custom(LogPanicHandler))
         .layer(TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            metrics::middleware,
+        ))
         .layer(axum::middleware::from_fn(correlation::correlation_middleware))
         .with_state(state)
 }

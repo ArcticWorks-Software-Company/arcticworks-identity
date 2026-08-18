@@ -74,6 +74,8 @@ pub struct Config {
     pub auto_migrate: bool,
     /// Serve the Swagger/OpenAPI UI at /api/docs.
     pub docs_enabled: bool,
+    /// Serve the Prometheus-text metrics endpoint at /metrics.
+    pub metrics_enabled: bool,
     pub log_format: LogFormat,
 
     pub seed_admin_email: String,
@@ -185,6 +187,7 @@ impl Config {
                 .filter(|v| !v.is_empty()),
             auto_migrate: get_bool("AUTO_MIGRATE", true),
             docs_enabled: get_bool("DOCS_ENABLED", true),
+            metrics_enabled: get_bool("METRICS_ENABLED", true),
             log_format,
             seed_admin_email: get("SEED_ADMIN_EMAIL", "admin@arcticworks.dev"),
             seed_admin_password: get("SEED_ADMIN_PASSWORD", "ChangeMe-1234"),

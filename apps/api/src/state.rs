@@ -7,6 +7,7 @@ use sqlx::PgPool;
 
 use crate::config::Config;
 use crate::email::Mailer;
+use crate::metrics::Metrics;
 use crate::ratelimit::RateLimiter;
 
 #[derive(Clone)]
@@ -15,8 +16,10 @@ pub struct AppState {
     pub pool: PgPool,
     pub rl: Arc<RateLimiter>,
     pub mailer: Arc<Mailer>,
-    /// Key encrypting TOTP secrets at rest.
+    /// Key encrypting TOTP secrets and webhook signing secrets at rest.
     pub totp_key: Arc<Aes256Gcm>,
+    /// Request counters for the Prometheus-text /metrics endpoint.
+    pub metrics: Arc<Metrics>,
 }
 
 impl AppState {
@@ -35,6 +38,7 @@ impl AppState {
             rl: Arc::new(rl),
             mailer,
             totp_key,
+            metrics: Arc::new(Metrics::default()),
         })
     }
 }

@@ -103,8 +103,16 @@ validating until their expiry (validation honors the 24-hour grace window).
 - Structured JSON logs with `x-correlation-id` on every request and audit
   event; ship to your log pipeline.
 - `/healthz` (liveness) and `/healthz/ready` (database connectivity) for the
-  orchestrator/load balancer.
-- The audit log is the security record — replicate it off-host.
+  orchestrator/load balancer; all production containers carry Docker
+  healthchecks (api: `/healthz/ready` via curl, web: HTTP 200, nginx: HTTP
+  reachability).
+- `/metrics` exposes Prometheus-text request counters
+  (`http_requests_total{method,path,status}`) and database pool gauges
+  (`METRICS_ENABLED`, on by default). The reference nginx config blocks
+  `/metrics` publicly — allow-list your collector IPs and proxy to the API
+  to scrape it.
+- The audit log is the security record — replicate it off-host (see also
+  org-scoped webhooks for streaming events).
 
 ## Capacity notes
 
